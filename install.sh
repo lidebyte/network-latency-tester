@@ -43,9 +43,9 @@ echo -e "${BLUE}📥 下载延迟检测工具...${NC}"
 temp_file=$(mktemp)
 
 if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "https://raw.githubusercontent.com/your-username/network-latency-tester/main/latency.sh" -o "$temp_file"
+    curl -fsSL "https://raw.githubusercontent.com/Cd1s/network-latency-tester/refs/heads/main/latency.sh" -o "$temp_file"
 elif command -v wget >/dev/null 2>&1; then
-    wget -q "https://raw.githubusercontent.com/your-username/network-latency-tester/main/latency.sh" -O "$temp_file"
+    wget -q "https://raw.githubusercontent.com/Cd1s/network-latency-tester/refs/heads/main/latency.sh" -O "$temp_file"
 fi
 
 if [[ ! -s "$temp_file" ]]; then
