@@ -82,7 +82,6 @@ show_menu() {
     echo -e "${BLUE}│                                                             │${NC}"
     echo -e "${BLUE}└─────────────────────────────────────────────────────────────┘${NC}"
     echo ""
-    echo -n -e "${YELLOW}请选择 (0-2): ${NC}"
 }
 
 # 测试单个网站延迟
@@ -319,6 +318,7 @@ main() {
         show_menu
         
         # 读取用户输入，确保等待输入
+        echo -n -e "${YELLOW}请选择 (0-2): ${NC}"
         read -r choice
         
         # 处理空输入
