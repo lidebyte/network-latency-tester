@@ -84,6 +84,57 @@ show_menu() {
     echo ""
 }
 
+# 测试TCP连接延迟
+test_tcp_latency() {
+    local host=$1
+    local port=$2
+    local count=${3:-3}
+    
+    local total_time=0
+    local successful_connects=0
+    
+    for ((i=1; i<=count; i++)); do
+        local start_time=$(date +%s%N)
+        if timeout 5 bash -c "exec 3<>/dev/tcp/$host/$port && exec 3<&- && exec 3>&-" 2>/dev/null; then
+            local end_time=$(date +%s%N)
+            local connect_time=$(( (end_time - start_time) / 1000000 ))
+            total_time=$((total_time + connect_time))
+            ((successful_connects++))
+        fi
+    done
+    
+    if [ $successful_connects -gt 0 ]; then
+        echo $((total_time / successful_connects))
+    else
+        echo "999999"
+    fi
+}
+
+# 测试HTTP连接延迟
+test_http_latency() {
+    local host=$1
+    local count=${2:-3}
+    
+    local total_time=0
+    local successful_requests=0
+    
+    for ((i=1; i<=count; i++)); do
+        local connect_time=$(timeout 8 curl -o /dev/null -s -w '%{time_connect}' --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
+        
+        if [[ "$connect_time" =~ ^[0-9]+\.?[0-9]*$ ]] && [ "$(echo "$connect_time < 10" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+            local time_ms=$(echo "$connect_time * 1000" | bc -l 2>/dev/null | cut -d'.' -f1)
+            total_time=$((total_time + time_ms))
+            ((successful_requests++))
+        fi
+    done
+    
+    if [ $successful_requests -gt 0 ]; then
+        echo $((total_time / successful_requests))
+    else
+        echo "999999"
+    fi
+}
+
 # 测试单个网站延迟
 test_site_latency() {
     local host=$1
@@ -94,39 +145,73 @@ test_site_latency() {
     local ping_result=""
     local ping_ms=""
     local status=""
+    local latency_ms=""
     
-    # 执行ping测试
+    # 首先尝试ping测试
     ping_result=$(timeout 10 ping -c $PING_COUNT -W 3 "$host" 2>/dev/null | grep 'rtt min/avg/max/mdev' || true)
     
     if [ ! -z "$ping_result" ]; then
         ping_ms=$(echo "$ping_result" | cut -d'/' -f5 | cut -d' ' -f1)
         
         if [[ "$ping_ms" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-            local ping_int=$(echo "$ping_ms" | cut -d'.' -f1)
-            
-            if [ "$ping_int" -lt 50 ]; then
-                status="优秀"
-                echo -e "${GREEN}${ping_ms}ms 🟢 优秀${NC}"
-            elif [ "$ping_int" -lt 150 ]; then
-                status="良好"
-                echo -e "${YELLOW}${ping_ms}ms 🟡 良好${NC}"
-            else
-                status="较差"
-                echo -e "${RED}${ping_ms}ms 🔴 较差${NC}"
-            fi
-            
-            RESULTS+=("$service|$host|${ping_ms}ms|$status")
-        else
-            status="失败"
-            echo -e "${RED}解析失败 ❌${NC}"
-            RESULTS+=("$service|$host|超时|失败")
+            latency_ms="$ping_ms"
         fi
+    fi
+    
+    # 如果ping失败，尝试其他方法
+    if [ -z "$latency_ms" ]; then
+        # 对特定网站使用特定端口进行TCP测试
+        case "$service" in
+            "Telegram")
+                # Telegram使用443端口
+                local tcp_latency=$(test_tcp_latency "$host" 443 2)
+                if [ "$tcp_latency" != "999999" ]; then
+                    latency_ms="$tcp_latency.0"
+                fi
+                ;;
+            "Netflix")
+                # Netflix使用特殊HTTP连接测试
+                local connect_time=$(timeout 8 curl -o /dev/null -s -w '%{time_connect}' --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
+                if [[ "$connect_time" =~ ^[0-9]+\.?[0-9]*$ ]] && [ "$(echo "$connect_time < 10" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
+                    local time_ms=$(echo "$connect_time * 1000" | bc -l 2>/dev/null | cut -d'.' -f1)
+                    latency_ms="$time_ms.0"
+                fi
+                ;;
+            *)
+                # 其他网站尝试HTTP连接测试
+                local http_latency=$(test_http_latency "$host" 2)
+                if [ "$http_latency" != "999999" ]; then
+                    latency_ms="$http_latency.0"
+                fi
+                ;;
+        esac
+    fi
+    
+    # 根据延迟结果显示状态
+    if [ ! -z "$latency_ms" ] && [[ "$latency_ms" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+        local latency_int=$(echo "$latency_ms" | cut -d'.' -f1)
+        
+        if [ "$latency_int" -lt 50 ]; then
+            status="优秀"
+            echo -e "${GREEN}${latency_ms}ms 🟢 优秀${NC}"
+        elif [ "$latency_int" -lt 150 ]; then
+            status="良好"
+            echo -e "${YELLOW}${latency_ms}ms 🟡 良好${NC}"
+        elif [ "$latency_int" -lt 500 ]; then
+            status="较差"
+            echo -e "${RED}${latency_ms}ms 🔴 较差${NC}"
+        else
+            status="很差"
+            echo -e "${RED}${latency_ms}ms 🔴 很差${NC}"
+        fi
+        
+        RESULTS+=("$service|$host|${latency_ms}ms|$status")
     else
-        # 如果ping失败，尝试curl测试连通性
+        # 最后尝试简单连通性测试
         if timeout 5 curl -s --connect-timeout 3 "$host" >/dev/null 2>&1; then
-            status="连通但无ping"
-            echo -e "${YELLOW}连通(无ping) 🟡${NC}"
-            RESULTS+=("$service|$host|连通|连通但无ping")
+            status="连通但测不出延迟"
+            echo -e "${YELLOW}连通(测不出延迟) 🟡${NC}"
+            RESULTS+=("$service|$host|连通|连通但测不出延迟")
         else
             status="失败"
             echo -e "${RED}超时/失败 ❌${NC}"
@@ -220,6 +305,7 @@ show_results() {
             "优秀") status_colored="${GREEN}🟢 $status${NC}" ;;
             "良好") status_colored="${YELLOW}🟡 $status${NC}" ;;
             "较差") status_colored="${RED}🔴 $status${NC}" ;;
+            "很差") status_colored="${RED}💀 $status${NC}" ;;
             *) status_colored="$status" ;;
         esac
         
@@ -239,6 +325,7 @@ show_results() {
     local excellent_count=$(printf '%s\n' "${RESULTS[@]}" | grep -c "优秀" || true)
     local good_count=$(printf '%s\n' "${RESULTS[@]}" | grep -c "良好" || true)
     local poor_count=$(printf '%s\n' "${RESULTS[@]}" | grep -c "较差" || true)
+    local very_poor_count=$(printf '%s\n' "${RESULTS[@]}" | grep -c "很差" || true)
     local failed_count=$(printf '%s\n' "${RESULTS[@]}" | grep -c "失败" || true)
     
     echo ""
@@ -246,13 +333,14 @@ show_results() {
     echo -e "${BLUE}─────────────────────────────────────────────────────────────${NC}"
     echo -e "🟢 优秀 (< 50ms):     ${GREEN}$excellent_count${NC} 个服务"
     echo -e "🟡 良好 (50-150ms):   ${YELLOW}$good_count${NC} 个服务"
-    echo -e "🔴 较差 (> 150ms):    ${RED}$poor_count${NC} 个服务"
+    echo -e "🔴 较差 (150-500ms):  ${RED}$poor_count${NC} 个服务"
+    echo -e "💀 很差 (> 500ms):    ${RED}$very_poor_count${NC} 个服务"
     echo -e "❌ 失败:             ${RED}$failed_count${NC} 个服务"
     
     # 网络质量评估
-    local total_tested=$((excellent_count + good_count + poor_count + failed_count))
+    local total_tested=$((excellent_count + good_count + poor_count + very_poor_count + failed_count))
     if [ $total_tested -gt 0 ]; then
-        local success_rate=$(((excellent_count + good_count) * 100 / total_tested))
+        local success_rate=$(((excellent_count + good_count + poor_count + very_poor_count) * 100 / total_tested))
         echo ""
         if [ $success_rate -gt 80 ] && [ $excellent_count -gt $good_count ]; then
             echo -e "🌟 ${GREEN}网络状况: 优秀${NC} (成功率: ${success_rate}%)"
@@ -275,19 +363,35 @@ show_results() {
     echo -e "💾 结果已保存到: ${GREEN}$output_file${NC}"
     echo ""
     echo -e "${CYAN}💡 延迟等级说明:${NC}"
-    echo -e "  ${GREEN}🟢 优秀${NC} (< 50ms)   - 适合游戏、视频通话"
-    echo -e "  ${YELLOW}🟡 良好${NC} (50-150ms) - 适合网页浏览、视频"
-    echo -e "  ${RED}🔴 较差${NC} (> 150ms)  - 基础使用，可能影响体验"
+    echo -e "  ${GREEN}🟢 优秀${NC} (< 50ms)     - 适合游戏、视频通话"
+    echo -e "  ${YELLOW}🟡 良好${NC} (50-150ms)   - 适合网页浏览、视频"
+    echo -e "  ${RED}🔴 较差${NC} (150-500ms)  - 基础使用，可能影响体验"
+    echo -e "  ${RED}💀 很差${NC} (> 500ms)    - 网络质量很差"
     
     echo ""
     echo -n -e "${YELLOW}按 Enter 键返回主菜单...${NC}"
     read -r
 }
 
-# 检查依赖
+# 检查并安装依赖
 check_dependencies() {
-    local missing_deps=()
+    echo -e "${CYAN}🔧 检查系统依赖...${NC}"
     
+    local missing_deps=()
+    local install_cmd=""
+    
+    # 检测系统类型
+    if command -v apt-get >/dev/null 2>&1; then
+        install_cmd="apt-get"
+    elif command -v yum >/dev/null 2>&1; then
+        install_cmd="yum"
+    elif command -v apk >/dev/null 2>&1; then
+        install_cmd="apk"
+    elif command -v brew >/dev/null 2>&1; then
+        install_cmd="brew"
+    fi
+    
+    # 检查必要的依赖
     if ! command -v ping >/dev/null 2>&1; then
         missing_deps+=("ping")
     fi
@@ -296,16 +400,127 @@ check_dependencies() {
         missing_deps+=("curl")
     fi
     
-    if [ ${#missing_deps[@]} -ne 0 ]; then
-        echo -e "${RED}❌ 错误: 缺少必要的依赖:${NC}"
-        printf '%s\n' "${missing_deps[@]}"
-        echo ""
-        echo "请先安装缺少的依赖:"
-        echo "Ubuntu/Debian: sudo apt update && sudo apt install curl iputils-ping"
-        echo "CentOS/RHEL:   sudo yum install curl iputils"
-        echo "macOS:         已自带所需工具"
-        exit 1
+    if ! command -v bc >/dev/null 2>&1; then
+        missing_deps+=("bc")
     fi
+    
+    # 如果有缺失的依赖，尝试自动安装
+    if [ ${#missing_deps[@]} -ne 0 ]; then
+        echo -e "${YELLOW}⚠️  发现缺失依赖: ${missing_deps[*]}${NC}"
+        
+        if [ -n "$install_cmd" ] && [ "$(id -u)" = "0" ]; then
+            echo -e "${CYAN}🚀 正在自动安装依赖...${NC}"
+            
+            case $install_cmd in
+                "apt-get")
+                    apt-get update -qq >/dev/null 2>&1
+                    if echo "${missing_deps[*]}" | grep -q "ping"; then
+                        apt-get install -y iputils-ping >/dev/null 2>&1
+                    fi
+                    if echo "${missing_deps[*]}" | grep -q "curl"; then
+                        apt-get install -y curl >/dev/null 2>&1
+                    fi
+                    if echo "${missing_deps[*]}" | grep -q "bc"; then
+                        apt-get install -y bc >/dev/null 2>&1
+                    fi
+                    ;;
+                "yum")
+                    if echo "${missing_deps[*]}" | grep -q "ping"; then
+                        yum install -y iputils >/dev/null 2>&1
+                    fi
+                    if echo "${missing_deps[*]}" | grep -q "curl"; then
+                        yum install -y curl >/dev/null 2>&1
+                    fi
+                    if echo "${missing_deps[*]}" | grep -q "bc"; then
+                        yum install -y bc >/dev/null 2>&1
+                    fi
+                    ;;
+                "apk")
+                    apk update >/dev/null 2>&1
+                    if echo "${missing_deps[*]}" | grep -q "ping"; then
+                        apk add iputils >/dev/null 2>&1
+                    fi
+                    if echo "${missing_deps[*]}" | grep -q "curl"; then
+                        apk add curl >/dev/null 2>&1
+                    fi
+                    if echo "${missing_deps[*]}" | grep -q "bc"; then
+                        apk add bc >/dev/null 2>&1
+                    fi
+                    ;;
+                "brew")
+                    if echo "${missing_deps[*]}" | grep -q "curl"; then
+                        brew install curl >/dev/null 2>&1
+                    fi
+                    if echo "${missing_deps[*]}" | grep -q "bc"; then
+                        brew install bc >/dev/null 2>&1
+                    fi
+                    ;;
+            esac
+            
+            # 再次检查安装结果
+            local still_missing=()
+            for dep in "${missing_deps[@]}"; do
+                case $dep in
+                    "ping")
+                        if ! command -v ping >/dev/null 2>&1; then
+                            still_missing+=("ping")
+                        fi
+                        ;;
+                    "curl")
+                        if ! command -v curl >/dev/null 2>&1; then
+                            still_missing+=("curl")
+                        fi
+                        ;;
+                    "bc")
+                        if ! command -v bc >/dev/null 2>&1; then
+                            still_missing+=("bc")
+                        fi
+                        ;;
+                esac
+            done
+            
+            if [ ${#still_missing[@]} -eq 0 ]; then
+                echo -e "${GREEN}✅ 所有依赖安装成功！${NC}"
+            else
+                echo -e "${RED}❌ 部分依赖安装失败: ${still_missing[*]}${NC}"
+                show_manual_install_instructions
+                exit 1
+            fi
+            
+        else
+            echo -e "${RED}❌ 无法自动安装依赖${NC}"
+            if [ "$(id -u)" != "0" ]; then
+                echo -e "${YELLOW}💡 提示: 请使用 root 权限运行脚本以自动安装依赖${NC}"
+            fi
+            show_manual_install_instructions
+            exit 1
+        fi
+    else
+        echo -e "${GREEN}✅ 所有依赖已安装${NC}"
+    fi
+    
+    echo ""
+}
+
+# 显示手动安装说明
+show_manual_install_instructions() {
+    echo ""
+    echo -e "${CYAN}📝 手动安装说明:${NC}"
+    echo ""
+    echo "🐧 Ubuntu/Debian:"
+    echo "   sudo apt update && sudo apt install curl iputils-ping bc"
+    echo ""
+    echo "🎩 CentOS/RHEL/Fedora:"
+    echo "   sudo yum install curl iputils bc"
+    echo "   # 或者: sudo dnf install curl iputils bc"
+    echo ""
+    echo "🏔️  Alpine Linux:"
+    echo "   sudo apk update && sudo apk add curl iputils bc"
+    echo ""
+    echo "🍎 macOS:"
+    echo "   brew install curl bc"
+    echo "   # ping 通常已预装"
+    echo ""
 }
 
 # 主循环
