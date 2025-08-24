@@ -282,7 +282,7 @@ show_results() {
     
     echo ""
     echo -n -e "${YELLOW}按 Enter 键返回主菜单...${NC}"
-    read
+    read -r
 }
 
 # 检查依赖
@@ -318,7 +318,13 @@ main() {
         show_welcome
         show_menu
         
-        read choice
+        # 读取用户输入，确保等待输入
+        read -r choice
+        
+        # 处理空输入
+        if [ -z "$choice" ]; then
+            continue
+        fi
         
         case $choice in
             1)
@@ -330,12 +336,13 @@ main() {
             0)
                 echo ""
                 echo -e "${GREEN}👋 感谢使用网络延迟检测工具！${NC}"
-                echo -e "${CYAN}🌟 项目地址: https://github.com/your-username/network-latency-tester${NC}"
+                echo -e "${CYAN}🌟 项目地址: https://github.com/Cd1s/network-latency-tester${NC}"
                 exit 0
                 ;;
             *)
                 echo -e "${RED}❌ 无效选择，请输入 0、1 或 2${NC}"
-                sleep 2
+                echo -n -e "${YELLOW}按 Enter 键继续...${NC}"
+                read -r
                 ;;
         esac
     done
