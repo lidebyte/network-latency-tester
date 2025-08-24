@@ -43,9 +43,9 @@ echo -e "${BLUE}📥 下载延迟检测工具...${NC}"
 temp_file=$(mktemp)
 
 if command -v curl >/dev/null 2>&1; then
-    curl -fsSL "https://raw.githubusercontent.com/Cd1s/network-latency-tester/refs/heads/main/latency.sh" -o "$temp_file"
+    curl -fsSL "https://raw.githubusercontent.com/Cd1s/network-latency-tester/main/latency.sh" -o "$temp_file"
 elif command -v wget >/dev/null 2>&1; then
-    wget -q "https://raw.githubusercontent.com/Cd1s/network-latency-tester/refs/heads/main/latency.sh" -O "$temp_file"
+    wget -q "https://raw.githubusercontent.com/Cd1s/network-latency-tester/main/latency.sh" -O "$temp_file"
 fi
 
 if [[ ! -s "$temp_file" ]]; then
@@ -55,11 +55,19 @@ fi
 
 echo -e "${GREEN}✅ 下载成功${NC}"
 
-# 运行工具
-echo -e "${BLUE}🚀 启动网络延迟检测工具...${NC}"
-echo ""
-chmod +x "$temp_file"
-bash "$temp_file"
+# 安装到本地
+local_file="latency.sh"
+echo -e "${BLUE}💾 安装到当前目录...${NC}"
+cp "$temp_file" "$local_file"
+chmod +x "$local_file"
 
 # 清理临时文件
 rm -f "$temp_file"
+
+echo -e "${GREEN}✅ 安装完成！${NC}"
+echo ""
+echo -e "${CYAN}🚀 启动网络延迟检测工具...${NC}"
+echo ""
+
+# 直接运行
+./"$local_file"
