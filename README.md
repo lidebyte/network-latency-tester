@@ -1,4 +1,4 @@
-# �� 网络延迟一键检测工具
+# 网络延迟一键检测工具
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Shell Script](https://img.shields.io/badge/Shell-Bash-green.svg)](https://www.gnu.org/software/bash/)
