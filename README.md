@@ -18,9 +18,7 @@
 
 ```bash
 # 下载并运行
-wget -O latency.sh https://raw.githubusercontent.com/Cd1s/network-latency-tester/main/latency.sh
-chmod +x latency.sh
-./latency.sh
+bash <(wget -qO- https://raw.githubusercontent.com/Cd1s/network-latency-tester/main/latency.sh)
 ```
 
 ## 📋 测试网站
