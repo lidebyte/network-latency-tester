@@ -1109,8 +1109,9 @@ show_fping_results() {
                         latency_display="$latency"
                     fi
                     
-                    # 使用printf格式化延迟和丢包率列，确保对齐
-                    echo -e "$(printf "%-15s %-20s %-25s %-10s %-7s %-7s" "$count." "$service_name" "$host" "${latency_color}${latency_display}ms${NC}" "✅" "${loss_color}${packet_loss}${NC}")"
+                    # 使用printf格式化，延迟右对齐8字符宽度（不含颜色代码）
+                    local formatted_latency=$(printf "%8s" "${latency_display}ms")
+                    echo -e "$(printf "%-15s %-20s %-25s" "$count." "$service_name" "$host") ${latency_color}${formatted_latency}${NC} ✅    ${loss_color}${packet_loss}${NC}"
                 fi
                 ((count++))
             done
@@ -1140,8 +1141,9 @@ show_fping_results() {
                     tg_loss_color="${RED}"
                 fi
                 
-                # 使用printf格式化，保持与其他行一致的对齐
-                echo -e "$(printf "%-15s %-20s %-25s %-10s %-7s %-7s" "$count." "Telegram" "Telegram_DC" "${tg_latency_color}${TELEGRAM_BEST_LATENCY}ms${NC}" "✅" "${tg_loss_color}${TELEGRAM_BEST_LOSS}${NC}")"
+                # 使用printf格式化，延迟右对齐8字符宽度（与其他行一致）
+                local tg_formatted_latency=$(printf "%8s" "${TELEGRAM_BEST_LATENCY}ms")
+                echo -e "$(printf "%-15s %-20s %-25s" "$count." "Telegram" "Telegram_DC") ${tg_latency_color}${tg_formatted_latency}${NC} ✅    ${tg_loss_color}${TELEGRAM_BEST_LOSS}${NC}"
                 ((count++))
             fi
         else
@@ -1558,7 +1560,7 @@ test_telegram_connectivity() {
     fi
     
     # 使用TCP连接测试443端口（Telegram标准端口）
-    echo -n "🔍 $(printf "%-12s" "$service") "
+    echo -n -e "🔍 ${CYAN}$(printf "%-12s" "$service")${NC} "
     
     local tcp_latency=$(test_tcp_latency "$TELEGRAM_BEST_IP" 443 3)
     
@@ -1566,18 +1568,21 @@ test_telegram_connectivity() {
         local status_text=""
         local tcp_latency_int=${tcp_latency%.*}
         
+        # 格式化延迟为固定宽度（右对齐8字符）
+        local formatted_tcp_latency=$(printf "%7s" "${tcp_latency}ms")
+        
         if [[ $tcp_latency_int -lt 50 ]]; then
             status_text="优秀"
-            echo -e "$(printf "%-8s %-15s %s" "IPv4" "${TELEGRAM_BEST_IP}" "${GREEN}${tcp_latency}ms${NC}") ${GREEN}🟢 优秀${NC}"
+            echo -e "$(printf "%-8s %-17s" "IPv4" "${TELEGRAM_BEST_IP}") ${YELLOW}${formatted_tcp_latency}${NC}  ${GREEN}🟢 优秀${NC}"
         elif [[ $tcp_latency_int -lt 150 ]]; then
             status_text="良好"
-            echo -e "$(printf "%-8s %-15s %s" "IPv4" "${TELEGRAM_BEST_IP}" "${YELLOW}${tcp_latency}ms${NC}") ${YELLOW}🟡 良好${NC}"
+            echo -e "$(printf "%-8s %-17s" "IPv4" "${TELEGRAM_BEST_IP}") ${YELLOW}${formatted_tcp_latency}${NC}  ${YELLOW}🟡 良好${NC}"
         elif [[ $tcp_latency_int -lt 300 ]]; then
             status_text="一般"
-            echo -e "$(printf "%-8s %-15s %s" "IPv4" "${TELEGRAM_BEST_IP}" "${PURPLE}${tcp_latency}ms${NC}") ${PURPLE}⚠️  一般${NC}"
+            echo -e "$(printf "%-8s %-17s" "IPv4" "${TELEGRAM_BEST_IP}") ${PURPLE}${formatted_tcp_latency}${NC}  ${PURPLE}⚠️  一般${NC}"
         else
             status_text="较差"
-            echo -e "$(printf "%-8s %-15s %s" "IPv4" "${TELEGRAM_BEST_IP}" "${RED}${tcp_latency}ms${NC}") ${RED}❌ 较差${NC}"
+            echo -e "$(printf "%-8s %-17s" "IPv4" "${TELEGRAM_BEST_IP}") ${RED}${formatted_tcp_latency}${NC}  ${RED}❌ 较差${NC}"
         fi
         
         RESULTS+=("$service|Telegram_DC|${tcp_latency}ms|$status_text|$TELEGRAM_BEST_IP|N/A|0%|$TELEGRAM_BEST_DC")
@@ -2680,6 +2685,9 @@ show_results() {
     for result in "${sorted_results[@]}"; do
         IFS='|' read -r service host latency status ipv4_addr ipv6_addr packet_loss version <<< "$result"
         
+        # 调试：如果packet_loss为空，输出提示
+        # [[ -z "$packet_loss" ]] && echo "DEBUG: $service packet_loss is empty, result=$result" >&2
+        
         local status_colored=""
         local status_icon=""
         case "$status" in
@@ -2717,9 +2725,10 @@ show_results() {
         fi
         
         # 格式化丢包率显示（packet_loss 已经包含 % 符号）
-        local loss_display="$packet_loss"
+        # 先去除可能的空格
+        local loss_display=$(echo "$packet_loss" | tr -d '[:space:]')
         # 处理各种情况：空、N/A、或没有 %
-        if [[ -z "$loss_display" ]]; then
+        if [[ -z "$loss_display" || "$loss_display" == "%" ]]; then
             loss_display="0%"
         elif [[ "$loss_display" == "N/A" ]]; then
             loss_display="N/A"
