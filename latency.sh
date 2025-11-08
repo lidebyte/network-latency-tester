@@ -1568,21 +1568,18 @@ test_telegram_connectivity() {
         local status_text=""
         local tcp_latency_int=${tcp_latency%.*}
         
-        # 格式化延迟为固定宽度（右对齐8字符）
-        local formatted_tcp_latency=$(printf "%7s" "${tcp_latency}ms")
-        
         if [[ $tcp_latency_int -lt 50 ]]; then
             status_text="优秀"
-            echo -e "$(printf "%-8s %-17s" "IPv4" "${TELEGRAM_BEST_IP}") ${YELLOW}${formatted_tcp_latency}${NC}  ${GREEN}🟢 优秀${NC}"
+            echo -e "$(printf "%-8s %-15s %-8s" "IPv4" "${TELEGRAM_BEST_IP}" "${tcp_latency}ms") ${GREEN}🟢 优秀${NC}"
         elif [[ $tcp_latency_int -lt 150 ]]; then
             status_text="良好"
-            echo -e "$(printf "%-8s %-17s" "IPv4" "${TELEGRAM_BEST_IP}") ${YELLOW}${formatted_tcp_latency}${NC}  ${YELLOW}🟡 良好${NC}"
+            echo -e "$(printf "%-8s %-15s %-8s" "IPv4" "${TELEGRAM_BEST_IP}" "${tcp_latency}ms") ${YELLOW}🟡 良好${NC}"
         elif [[ $tcp_latency_int -lt 300 ]]; then
             status_text="一般"
-            echo -e "$(printf "%-8s %-17s" "IPv4" "${TELEGRAM_BEST_IP}") ${PURPLE}${formatted_tcp_latency}${NC}  ${PURPLE}⚠️  一般${NC}"
+            echo -e "$(printf "%-8s %-15s %-8s" "IPv4" "${TELEGRAM_BEST_IP}" "${tcp_latency}ms") ${PURPLE}⚠️  一般${NC}"
         else
             status_text="较差"
-            echo -e "$(printf "%-8s %-17s" "IPv4" "${TELEGRAM_BEST_IP}") ${RED}${formatted_tcp_latency}${NC}  ${RED}❌ 较差${NC}"
+            echo -e "$(printf "%-8s %-15s %-8s" "IPv4" "${TELEGRAM_BEST_IP}" "${tcp_latency}ms") ${RED}❌ 较差${NC}"
         fi
         
         RESULTS+=("$service|Telegram_DC|${tcp_latency}ms|$status_text|$TELEGRAM_BEST_IP|N/A|0%|$TELEGRAM_BEST_DC")
