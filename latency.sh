@@ -334,7 +334,7 @@ generate_markdown_output() {
             echo ""
             
             # 统计分析
-            echo "## � 测试统计概览"
+            echo "## 📊 测试统计概览"
             echo ""
             local total_tests=${#RESULTS[@]}
             local excellent_count=0
@@ -360,7 +360,7 @@ generate_markdown_output() {
             echo ""
             
             # Ping/真连接测试结果
-            echo "## �📊 Ping/真连接延迟测试"
+            echo "## 📊 Ping/真连接延迟测试"
             echo ""
             echo "| 🏆 | 服务 | 域名 | ⏱️ 延迟 | 📉 丢包率 | 📍 状态 | 🌐 IPv4 |"
             echo "|:---:|------|------|:------:|:--------:|:------:|---------|"
@@ -2656,24 +2656,24 @@ show_results() {
         local status_icon=""
         case "$status" in
             "优秀") 
-                status_colored="${GREEN}✅优秀${NC}"
-                status_icon="✅"
+                status_colored="${GREEN}✓ 优秀${NC}"
+                status_icon="✓"
                 ;;
             "良好") 
-                status_colored="${YELLOW}�良好${NC}"
-                status_icon="🔸"
+                status_colored="${YELLOW}◆ 良好${NC}"
+                status_icon="◆"
                 ;;
             "较差") 
-                status_colored="${RED}⚠️较差${NC}"
-                status_icon="⚠️"
+                status_colored="${RED}▲ 较差${NC}"
+                status_icon="▲"
                 ;;
             "很差") 
-                status_colored="${RED}❌很差${NC}"
-                status_icon="❌"
+                status_colored="${RED}✗ 很差${NC}"
+                status_icon="✗"
                 ;;
             "一般")
-                status_colored="${PURPLE}⚠️一般${NC}"
-                status_icon="⚠️"
+                status_colored="${PURPLE}~ 一般${NC}"
+                status_icon="~"
                 ;;
             *) 
                 status_colored="$status"
@@ -2681,14 +2681,19 @@ show_results() {
                 ;;
         esac
         
-        # 格式化延迟显示（确保右对齐）
+        # 格式化延迟显示（确保右对齐，保持一致格式）
         local latency_display="$latency"
-        if [[ "$latency" =~ ^[0-9]+\.?[0-9]*ms$ ]]; then
-            latency_display="$latency"
+        # 如果延迟是整数，添加 .0
+        if [[ "$latency" =~ ^([0-9]+)ms$ ]]; then
+            latency_display="${BASH_REMATCH[1]}.0ms"
         fi
         
-        # 格式化丢包率显示
-        local loss_display="${packet_loss:-0%}"
+        # 格式化丢包率显示（packet_loss 已经包含 % 符号）
+        local loss_display="$packet_loss"
+        # 如果没有 % 符号，添加它
+        if [[ ! "$loss_display" =~ % ]]; then
+            loss_display="${packet_loss:-0}%"
+        fi
         
         # 特殊处理Telegram显示
         local host_display="$host"
