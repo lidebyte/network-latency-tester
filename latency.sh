@@ -1226,9 +1226,9 @@ declare -A DNS_SERVERS=(
 
 # 测试文件URL列表（用于下载速度测试）
 declare -A DOWNLOAD_TEST_URLS=(
-    ["Cloudflare"]="https://speed.cloudflare.com/__down?bytes=104857600"
-    ["Fast.com"]="https://fast.com"
-    ["YouTube"]="https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+    ["Cloudflare"]="https://speed.cloudflare.com/__down?bytes=10485760"
+    ["GitHub"]="https://github.com/git/git/archive/refs/heads/master.zip"
+    ["jsdelivr"]="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"
 )
 
 # 结果数组
@@ -1399,6 +1399,10 @@ test_download_speed() {
                 
                 # 计算瞬时速度
                 local instant_speed_mbps=$(echo "scale=2; $bytes_this_sec / 1048576" | bc -l 2>/dev/null || echo "0")
+                # 确保前导0存在
+                if [[ "$instant_speed_mbps" =~ ^\. ]]; then
+                    instant_speed_mbps="0${instant_speed_mbps}"
+                fi
                 
                 # 更新最大速度
                 if (( $(echo "$instant_speed_mbps > $max_speed" | bc -l 2>/dev/null || echo 0) )); then
@@ -1416,6 +1420,14 @@ test_download_speed() {
     # 计算平均速度
     if [[ $samples -gt 0 ]] && [[ $total_bytes -gt 0 ]]; then
         local avg_speed_mbps=$(echo "scale=2; $total_bytes / $samples / 1048576" | bc -l 2>/dev/null || echo "0")
+        # 确保前导0存在
+        if [[ "$avg_speed_mbps" =~ ^\. ]]; then
+            avg_speed_mbps="0${avg_speed_mbps}"
+        fi
+        # 确保max_speed也有前导0
+        if [[ "$max_speed" =~ ^\. ]]; then
+            max_speed="0${max_speed}"
+        fi
         
         if (( $(echo "$avg_speed_mbps > 0.1" | bc -l 2>/dev/null || echo 0) )); then
             echo -e "${GREEN}平均 ${avg_speed_mbps} MB/s, 峰值 ${max_speed} MB/s ⚡${NC}"
