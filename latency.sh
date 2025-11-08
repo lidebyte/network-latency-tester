@@ -1,4 +1,4 @@
-#!/bin/bash
+﻿#!/bin/bash
 # 网络延迟一键检测工具 - Interactive Network Latency Tester
 # Version: 2.1 - Enhanced with global DNS, IPv4/IPv6 priority, fping support
 
@@ -1343,6 +1343,7 @@ show_menu() {
     echo -e "  ${GREEN}3${NC} 🔄 综合测试"
     echo -e "  ${GREEN}4${NC} 🌍 IPv4/IPv6优先设置"
     echo -e "  ${GREEN}5${NC} ⚙️  DNS解析设置"
+    echo -e "  ${GREEN}6${NC} 💾 结果文件输出设置 $(if [[ "$ENABLE_OUTPUT" == "true" ]]; then echo -e "${GREEN}[已启用]${NC}"; else echo -e "${YELLOW}[已禁用]${NC}"; fi)"
     echo -e "  ${RED}0${NC} 🚪 退出程序"
     echo ""
 }
@@ -1389,24 +1390,24 @@ test_tcp_latency() {
 test_telegram_connectivity() {
     local service=$1
     
-    echo -n -e "🔍 ${CYAN}$(printf "%-12s" "$service")${NC} "
-    
     # 检查是否有Python环境
     if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
         echo -e "${RED}需要Python环境 ❌${NC}"
-        RESULTS+=("$service|Telegram DC Test|N/A|需要Python|N/A|N/A|N/A|N/A")
+        RESULTS+=("$service|telegram_dc_test|N/A|需要Python|N/A|N/A|N/A|N/A")
         return
     fi
     
-    # 使用Python检测Telegram节点
+    # 使用Python获取所有Telegram DC节点IP
     local python_cmd="python3"
     if ! command -v python3 >/dev/null 2>&1; then
         python_cmd="python"
     fi
     
-    # 执行Telegram节点检测
-    local tg_result=$($python_cmd - <<'PYTHON_EOF'
-import re, socket, time, sys
+    echo -n "🔍 获取Telegram DC节点..."
+    
+    # 获取所有DC节点IP和DC号的映射
+    local tg_nodes=$($python_cmd - <<'PYTHON_EOF'
+import re
 try:
     import urllib.request
     url = "https://core.telegram.org/getProxyConfig"
@@ -1414,60 +1415,110 @@ try:
     pattern = re.compile(r'proxy_for\s+(-?\d+)\s+([\d.]+):(\d+);')
     entries = pattern.findall(data)
     
-    dcs = {}
+    # 输出格式: IP|DC号
+    seen_ips = set()
     for dc, ip, port in entries:
-        dc_id = abs(int(dc))
-        dcs.setdefault(dc_id, []).append((ip, int(port)))
-    
-    best_latency = 999999
-    best_node = None
-    
-    for dc_id, nodes in dcs.items():
-        for ip, port in nodes[:3]:  # 每个DC测试前3个节点
-            try:
-                start = time.time()
-                sock = socket.create_connection((ip, port), timeout=1.5)
-                latency = round((time.time() - start) * 1000, 2)
-                sock.close()
-                if latency < best_latency:
-                    best_latency = latency
-                    best_node = f"{ip}:{port}|DC{dc_id}"
-            except:
-                pass
-    
-    if best_node:
-        print(f"SUCCESS|{best_node}|{best_latency}")
-    else:
-        print("FAILED")
+        if ip not in seen_ips:
+            dc_id = abs(int(dc))
+            print(f"{ip}|DC{dc_id}")
+            seen_ips.add(ip)
 except Exception as e:
-    print(f"ERROR|{str(e)}")
+    pass
 PYTHON_EOF
 )
     
-    # 解析结果
-    if [[ "$tg_result" == SUCCESS* ]]; then
-        IFS='|' read -r status node dc latency <<< "$tg_result"
+    if [[ -z "$tg_nodes" ]]; then
+        echo -e " ${RED}失败 ❌${NC}"
+        RESULTS+=("$service|telegram_dc_test|超时|失败|N/A|N/A|N/A|N/A")
+        return
+    fi
+    
+    echo -e " ${GREEN}完成${NC}"
+    
+    # 提取所有IP地址用于fping测试
+    local ips=()
+    declare -A ip_to_dc
+    
+    while IFS='|' read -r ip dc; do
+        if [[ -n "$ip" ]]; then
+            ips+=("$ip")
+            ip_to_dc["$ip"]="$dc"
+        fi
+    done <<< "$tg_nodes"
+    
+    if [[ ${#ips[@]} -eq 0 ]]; then
+        echo -e "${RED}未获取到Telegram节点 ❌${NC}"
+        RESULTS+=("$service|telegram_dc_test|超时|失败|N/A|N/A|N/A|N/A")
+        return
+    fi
+    
+    echo "🏓 使用fping测试 ${#ips[@]} 个Telegram DC节点..."
+    
+    # 使用fping批量测试所有IP
+    local best_ip=""
+    local best_latency=999999
+    local best_dc=""
+    
+    if command -v fping >/dev/null 2>&1; then
+        local fping_output=$(fping -c 3 -t 1000 -q "${ips[@]}" 2>&1)
         
-        local latency_int=${latency%.*}
+        for ip in "${ips[@]}"; do
+            local result=$(echo "$fping_output" | grep "^$ip")
+            if [[ -n "$result" ]]; then
+                local avg=""
+                if echo "$result" | grep -q "min/avg/max"; then
+                    # macOS格式
+                    avg=$(echo "$result" | sed -n 's/.*min\/avg\/max = [0-9.]*\/\([0-9.]*\)\/.*/\1/p')
+                else
+                    # Linux格式
+                    avg=$(echo "$result" | sed -n 's/.*avg\/max = [0-9.]*\/[0-9.]*\/\([0-9.]*\).*/\1/p')
+                fi
+                
+                if [[ -n "$avg" ]]; then
+                    local avg_int=${avg%.*}
+                    if [[ $avg_int -lt $best_latency ]]; then
+                        best_latency=$avg_int
+                        best_ip="$ip"
+                        best_dc="${ip_to_dc[$ip]}"
+                    fi
+                fi
+            fi
+        done
+    else
+        # 没有fping，使用标准ping测试前5个
+        for ip in "${ips[@]:0:5}"; do
+            local latency=$(test_ip_latency "$ip" 2)
+            if [[ "$latency" != "999999" ]] && [[ "$latency" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                local latency_int=${latency%.*}
+                if [[ $latency_int -lt $best_latency ]]; then
+                    best_latency=$latency_int
+                    best_ip="$ip"
+                    best_dc="${ip_to_dc[$ip]}"
+                fi
+            fi
+        done
+    fi
+    
+    # 生成结果
+    if [[ -n "$best_ip" && $best_latency -lt 999999 ]]; then
         local status_text=""
-        local status_colored=""
+        local loss="0%"
         
-        if [[ $latency_int -lt 50 ]]; then
+        if [[ $best_latency -lt 50 ]]; then
             status_text="优秀"
-            status_colored="${GREEN}✅优秀${NC}"
-        elif [[ $latency_int -lt 150 ]]; then
+        elif [[ $best_latency -lt 150 ]]; then
             status_text="良好"
-            status_colored="${YELLOW}🔸良好${NC}"
+        elif [[ $best_latency -lt 300 ]]; then
+            status_text="一般"
         else
             status_text="较差"
-            status_colored="${RED}⚠️较差${NC}"
         fi
         
-        echo -e "$(printf "%-8s %-15s %-8s" "$dc" "$node" "${latency}ms") $status_colored"
-        RESULTS+=("$service|$node|${latency}ms|$status_text|$node|N/A|0%|$dc")
+        echo -e "✅ 最佳节点: ${GREEN}${best_ip}${NC} ($best_dc) - ${best_latency}ms"
+        RESULTS+=("$service|telegram_dc_test|${best_latency}ms|$status_text|$best_ip|N/A|$loss|$best_dc")
     else
-        echo -e "${RED}检测失败 ❌${NC}"
-        RESULTS+=("$service|Telegram DC Test|超时|失败|N/A|N/A|N/A|N/A")
+        echo -e "${RED}所有节点测试失败 ❌${NC}"
+        RESULTS+=("$service|telegram_dc_test|超时|失败|N/A|N/A|N/A|N/A")
     fi
 }
 
@@ -2583,6 +2634,10 @@ show_results() {
                 status_colored="${RED}❌很差${NC}"
                 status_icon="❌"
                 ;;
+            "一般")
+                status_colored="${PURPLE}⚠️一般${NC}"
+                status_icon="⚠️"
+                ;;
             *) 
                 status_colored="$status"
                 status_icon=""
@@ -2598,14 +2653,23 @@ show_results() {
         # 格式化丢包率显示
         local loss_display="${packet_loss:-0%}"
         
-        # 截断过长的IP地址
+        # 特殊处理Telegram显示
+        local host_display="$host"
         local ipv4_display="$ipv4_addr"
-        if [ ${#ipv4_addr} -gt 15 ]; then
-            ipv4_display="${ipv4_addr:0:13}..."
+        local version_display="${version:-IPv4}"
+        
+        if [[ "$host" == "telegram_dc_test" ]]; then
+            host_display="telegram_dc_test"
+            version_display="$version"  # DC号显示在版本列
+        else
+            # 截断过长的IP地址
+            if [ ${#ipv4_addr} -gt 15 ]; then
+                ipv4_display="${ipv4_addr:0:13}..."
+            fi
         fi
         
         # 使用format_row统一输出
-        format_row "$rank:4:right" "$service:15:left" "$host:25:left" "$latency_display:10:right" "$loss_display:8:right" "$status_colored:10:left" "$ipv4_display:16:left" "${version:-IPv4}:8:left"
+        format_row "$rank:4:right" "$service:15:left" "$host_display:25:left" "$latency_display:10:right" "$loss_display:8:right" "$status_colored:10:left" "$ipv4_display:16:left" "$version_display:8:left"
         ((rank++))
     done
     
@@ -2652,17 +2716,30 @@ show_results() {
         fi
     fi
     
-    # 保存结果
-    local output_file="latency_results_$(date +%Y%m%d_%H%M%S).txt"
-    {
-        echo "# 网络延迟测试结果 - $(date)"
-        echo "# 服务|域名|延迟|状态|IPv4地址|IPv6地址|丢包率"
-        printf '%s\n' "${RESULTS[@]}"
-    } > "$output_file"
-    
-    echo ""
-    echo -e "💾 结果已保存到: ${GREEN}$output_file${NC}"
-    echo ""
+    # 保存结果（如果启用）
+    if [[ "$ENABLE_OUTPUT" == "true" ]]; then
+        if [[ -z "$OUTPUT_FILE" ]]; then
+            OUTPUT_FILE="latency_results_$(date +%Y%m%d_%H%M%S).html"
+            OUTPUT_FORMAT="html"
+        fi
+        
+        echo ""
+        generate_output_file "$OUTPUT_FILE" "$OUTPUT_FORMAT"
+        echo ""
+        
+        # 提供查看文件的提示
+        if [[ "$OUTPUT_FORMAT" == "html" ]]; then
+            echo -e "${CYAN}💡 提示: 可以在浏览器中打开查看 HTML 报告${NC}"
+            if command -v explorer.exe >/dev/null 2>&1; then
+                echo -e "${YELLOW}   Windows: explorer.exe \"$(pwd)/$OUTPUT_FILE\"${NC}"
+            elif command -v open >/dev/null 2>&1; then
+                echo -e "${YELLOW}   macOS: open \"$OUTPUT_FILE\"${NC}"
+            elif command -v xdg-open >/dev/null 2>&1; then
+                echo -e "${YELLOW}   Linux: xdg-open \"$OUTPUT_FILE\"${NC}"
+            fi
+        fi
+        echo ""
+    fi
     echo -e "${CYAN}💡 延迟等级说明:${NC}"
     echo -e "  ${GREEN}🟢 优秀${NC} (< 50ms)     - 适合游戏、视频通话"
     echo -e "  ${YELLOW}🟡 良好${NC} (50-150ms)   - 适合网页浏览、视频"
@@ -3094,7 +3171,7 @@ main() {
         show_menu
         
         # 读取用户输入，确保等待输入
-        echo -n -e "${YELLOW}请选择 (0-5): ${NC}"
+        echo -n -e "${YELLOW}请选择 (0-6): ${NC}"
         read -r choice
         
         # 处理空输入
@@ -3118,6 +3195,9 @@ main() {
             5)
                 run_dns_management
                 ;;
+            6)
+                run_output_settings
+                ;;
             0)
                 echo ""
                 echo -e "${GREEN}👋 感谢使用网络延迟检测工具！${NC}"
@@ -3125,7 +3205,7 @@ main() {
                 exit 0
                 ;;
             *)
-                echo -e "${RED}❌ 无效选择，请输入 0-5${NC}"
+                echo -e "${RED}❌ 无效选择，请输入 0-6${NC}"
                 if [[ -t 0 ]]; then
                     echo -n -e "${YELLOW}按 Enter 键继续...${NC}"
                     read -r
@@ -3136,6 +3216,90 @@ main() {
                 ;;
         esac
     done
+}
+
+# 结果文件输出设置
+run_output_settings() {
+    clear
+    show_welcome
+    
+    echo -e "${CYAN}💾 结果文件输出设置${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    echo ""
+    echo -e "${YELLOW}当前状态:${NC} $(if [[ "$ENABLE_OUTPUT" == "true" ]]; then echo -e "${GREEN}已启用${NC}"; else echo -e "${YELLOW}已禁用${NC}"; fi)"
+    if [[ "$ENABLE_OUTPUT" == "true" ]] && [[ -n "$OUTPUT_FILE" ]]; then
+        echo -e "${YELLOW}输出路径:${NC} $OUTPUT_FILE"
+        echo -e "${YELLOW}输出格式:${NC} $OUTPUT_FORMAT"
+    fi
+    echo ""
+    echo -e "${YELLOW}选择操作:${NC}"
+    echo -e "  ${GREEN}1${NC} - 启用结果文件输出"
+    echo -e "  ${GREEN}2${NC} - 禁用结果文件输出"
+    echo -e "  ${GREEN}3${NC} - 设置输出路径和格式"
+    echo -e "  ${RED}0${NC} - 返回主菜单"
+    echo ""
+    echo -n -e "${YELLOW}请选择 (0-3): ${NC}"
+    read -r output_choice
+    
+    case $output_choice in
+        1)
+            ENABLE_OUTPUT=true
+            if [[ -z "$OUTPUT_FILE" ]]; then
+                OUTPUT_FILE="latency_results_$(date +%Y%m%d_%H%M%S).html"
+                OUTPUT_FORMAT="html"
+            fi
+            echo ""
+            echo -e "${GREEN}✅ 已启用结果文件输出${NC}"
+            echo -e "${CYAN}📄 结果将保存到: $OUTPUT_FILE${NC}"
+            echo ""
+            ;;
+        2)
+            ENABLE_OUTPUT=false
+            echo ""
+            echo -e "${YELLOW}⚠️  已禁用结果文件输出${NC}"
+            echo ""
+            ;;
+        3)
+            echo ""
+            echo -e "${YELLOW}选择输出格式:${NC}"
+            echo -e "  ${GREEN}1${NC} - HTML格式 (推荐，适合浏览器查看)"
+            echo -e "  ${GREEN}2${NC} - Markdown格式 (适合GitHub/文档)"
+            echo -e "  ${GREEN}3${NC} - 纯文本格式"
+            echo -e "  ${GREEN}4${NC} - JSON格式 (适合程序处理)"
+            echo ""
+            echo -n -e "${YELLOW}请选择格式 (1-4): ${NC}"
+            read -r format_choice
+            
+            local file_ext="html"
+            case $format_choice in
+                1) OUTPUT_FORMAT="html"; file_ext="html" ;;
+                2) OUTPUT_FORMAT="markdown"; file_ext="md" ;;
+                3) OUTPUT_FORMAT="text"; file_ext="txt" ;;
+                4) OUTPUT_FORMAT="json"; file_ext="json" ;;
+                *) OUTPUT_FORMAT="html"; file_ext="html" ;;
+            esac
+            
+            OUTPUT_FILE="latency_results_$(date +%Y%m%d_%H%M%S).$file_ext"
+            ENABLE_OUTPUT=true
+            
+            echo ""
+            echo -e "${GREEN}✅ 输出格式设置完成${NC}"
+            echo -e "${CYAN}📄 格式: $OUTPUT_FORMAT${NC}"
+            echo -e "${CYAN}📄 文件: $OUTPUT_FILE${NC}"
+            echo ""
+            ;;
+        0)
+            return
+            ;;
+        *)
+            echo ""
+            echo -e "${RED}❌ 无效选择${NC}"
+            echo ""
+            ;;
+    esac
+    
+    echo -n -e "${YELLOW}按 Enter 键返回主菜单...${NC}"
+    read -r
 }
 
 # DNS设置管理功能
