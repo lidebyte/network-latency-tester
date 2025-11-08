@@ -1554,7 +1554,8 @@ test_telegram_connectivity() {
     
     # 使用fping阶段缓存的最佳IP进行TCP连接测试
     if [[ -z "$TELEGRAM_BEST_IP" || "$TELEGRAM_BEST_LATENCY" == "N/A" ]]; then
-        echo -e "${RED}Telegram节点未检测到 ❌${NC}"
+        echo -n -e "🔍 ${CYAN}$(printf "%-12s" "$service")${NC} "
+        echo -e "$(printf "%-8s %-15s %-8s" "IPv4" "N/A" "超时") ${RED}❌ 失败${NC}"
         RESULTS+=("$service|Telegram_DC|超时|失败|N/A|N/A|N/A|N/A")
         return
     fi
@@ -1584,7 +1585,7 @@ test_telegram_connectivity() {
         
         RESULTS+=("$service|Telegram_DC|${tcp_latency}ms|$status_text|$TELEGRAM_BEST_IP|N/A|0%|$TELEGRAM_BEST_DC")
     else
-        echo -e "${RED}TCP连接失败 ❌${NC}"
+        echo -e "$(printf "%-8s %-15s %-8s" "IPv4" "${TELEGRAM_BEST_IP}" "超时") ${RED}❌ 失败${NC}"
         RESULTS+=("$service|Telegram_DC|超时|失败|$TELEGRAM_BEST_IP|N/A|N/A|$TELEGRAM_BEST_DC")
     fi
 }
@@ -2337,7 +2338,12 @@ run_comprehensive_test() {
     echo ""
     for service in "${!FULL_SITES[@]}"; do
         host="${FULL_SITES[$service]}"
-        test_site_latency "$host" "$service"
+        # 特殊处理Telegram检测
+        if [[ "$host" == "telegram_dc_test" ]]; then
+            test_telegram_connectivity "$service"
+        else
+            test_site_latency "$host" "$service"
+        fi
     done
     
     echo ""
