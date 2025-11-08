@@ -69,7 +69,53 @@ display_width() {
     fi
 }
 
-# 打印对齐的行（考虑中文字符）
+# 统一的格式化函数 - 支持固定列宽和对齐
+# 用法: format_row "col1:width:align" "col2:width:align" ...
+# align: left/right/center
+format_row() {
+    local output=""
+    for col_spec in "$@"; do
+        IFS=':' read -r content width align <<< "$col_spec"
+        
+        # 默认左对齐
+        if [[ -z "$align" ]]; then
+            align="left"
+        fi
+        
+        # 去除ANSI颜色代码计算实际长度
+        local clean_content=$(echo -e "$content" | sed 's/\x1b\[[0-9;]*m//g')
+        local actual_width=$(display_width "$clean_content")
+        local padding=$((width - actual_width))
+        
+        # 如果内容过长，截断
+        if [[ $padding -lt 0 ]]; then
+            local truncate_len=$((${#clean_content} + padding - 3))
+            if [[ $truncate_len -gt 0 ]]; then
+                clean_content="${clean_content:0:$truncate_len}..."
+                content="$clean_content"
+            fi
+            padding=0
+        fi
+        
+        # 根据对齐方式输出
+        case "$align" in
+            right)
+                output+="$(printf "%*s" $padding "")$content "
+                ;;
+            center)
+                local left_pad=$((padding / 2))
+                local right_pad=$((padding - left_pad))
+                output+="$(printf "%*s" $left_pad "")$content$(printf "%*s" $right_pad "") "
+                ;;
+            *)  # left
+                output+="$content$(printf "%*s" $padding "") "
+                ;;
+        esac
+    done
+    echo -e "$output"
+}
+
+# 打印对齐的行（考虑中文字符） - 已废弃，使用format_row替代
 print_aligned_row() {
     local rank="$1"
     local col1="$2"  # DNS名称
@@ -77,33 +123,8 @@ print_aligned_row() {
     local col3="$4"  # 延迟/时间
     local col4="$5"  # 状态（带颜色）
     
-    # 计算col1的实际显示宽度
-    local col1_display=$(display_width "$col1")
-    local col1_target=15
-    local padding1=$((col1_target - col1_display))
-    
-    # 如果padding为负，说明名称太长，需要截断或调整
-    if [[ $padding1 -lt 0 ]]; then
-        padding1=0
-    fi
-    
-    # 计算col2的实际显示宽度
-    local col2_display=$(display_width "$col2")
-    local col2_target=20
-    local padding2=$((col2_target - col2_display))
-    
-    # 如果padding为负，说明IP地址太长，需要截断或调整
-    if [[ $padding2 -lt 0 ]]; then
-        padding2=0
-    fi
-    
-    # 输出对齐的行
-    printf "%2d. %s%*s %s%*s %-12s" "$rank" "$col1" "$padding1" "" "$col2" "$padding2" "" "$col3"
-    if [[ -n "$col4" ]]; then
-        echo -e " $col4"
-    else
-        echo ""
-    fi
+    # 使用新的format_row函数
+    format_row "${rank}.:3:right" "$col1:18:left" "$col2:20:left" "$col3:12:right" "$col4:15:left"
 }
 
 # 配置变量
@@ -113,6 +134,12 @@ DNS_TEST_DOMAIN="google.com"  # DNS测试使用的域名
 IP_VERSION=""  # IP版本控制 (4/6/auto)
 SELECTED_DNS_SERVER=""  # 用户选择的DNS服务器用于IP解析
 SELECTED_DNS_NAME=""  # 用户选择的DNS服务器名称
+
+# 输出文件配置
+OUTPUT_FILE=""  # 输出文件路径
+OUTPUT_FORMAT="text"  # 输出格式: text/markdown/html/json
+ENABLE_OUTPUT=true  # 是否启用文件输出
+SINGLE_RESULT_PAGE=false  # 是否生成单页结果
 
 # 检测操作系统类型
 detect_os() {
@@ -179,6 +206,506 @@ get_timeout_cmd() {
 }
 
 detect_os
+
+# 解析命令行参数
+parse_arguments() {
+    while [[ $# -gt 0 ]]; do
+        case $1 in
+            --output-file)
+                OUTPUT_FILE="$2"
+                ENABLE_OUTPUT=true
+                # 根据文件扩展名自动检测格式
+                case "$OUTPUT_FILE" in
+                    *.md) OUTPUT_FORMAT="markdown" ;;
+                    *.html) OUTPUT_FORMAT="html" ;;
+                    *.json) OUTPUT_FORMAT="json" ;;
+                    *) OUTPUT_FORMAT="text" ;;
+                esac
+                shift 2
+                ;;
+            --no-output)
+                ENABLE_OUTPUT=false
+                shift
+                ;;
+            --single-result-page)
+                SINGLE_RESULT_PAGE=true
+                shift
+                ;;
+            --format)
+                OUTPUT_FORMAT="$2"
+                shift 2
+                ;;
+            --help|-h)
+                echo "网络延迟检测工具 - 使用说明"
+                echo ""
+                echo "用法: $0 [选项]"
+                echo ""
+                echo "选项:"
+                echo "  --output-file <path>     指定输出文件路径"
+                echo "  --no-output              禁用文件输出"
+                echo "  --single-result-page     生成单页结果（HTML/Markdown）"
+                echo "  --format <type>          输出格式: text/markdown/html/json"
+                echo "  --help, -h               显示此帮助信息"
+                echo ""
+                exit 0
+                ;;
+            *)
+                echo "未知参数: $1"
+                echo "使用 --help 查看帮助"
+                exit 1
+                ;;
+        esac
+    done
+}
+
+# 生成输出文件
+generate_output_file() {
+    local output_path="$1"
+    local format="$2"
+    
+    if [[ -z "$output_path" ]]; then
+        output_path="latency_results_$(date +%Y%m%d_%H%M%S).$format"
+    fi
+    
+    case "$format" in
+        markdown|md)
+            generate_markdown_output "$output_path"
+            ;;
+        html)
+            generate_html_output "$output_path"
+            ;;
+        json)
+            generate_json_output "$output_path"
+            ;;
+        *)
+            generate_text_output "$output_path"
+            ;;
+    esac
+    
+    echo -e "${GREEN}✅ 结果已保存到: $output_path${NC}"
+}
+
+# 生成文本格式输出
+generate_text_output() {
+    local file="$1"
+    {
+        echo "# 网络延迟测试结果 - $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "# =========================================="
+        echo ""
+        echo "## Ping/真连接测试结果"
+        echo "服务|域名|延迟|丢包率|状态|IPv4|版本"
+        printf '%s\n' "${RESULTS[@]}"
+        echo ""
+        if [[ ${#DNS_RESULTS[@]} -gt 0 ]]; then
+            echo "## DNS解析测试结果"
+            echo "DNS服务器|IP地址|解析时间|状态"
+            printf '%s\n' "${DNS_RESULTS[@]}"
+            echo ""
+        fi
+        if [[ ${#DOWNLOAD_RESULTS[@]} -gt 0 ]]; then
+            echo "## 下载速度测试结果"
+            echo "测试点|URL|速度|状态"
+            printf '%s\n' "${DOWNLOAD_RESULTS[@]}"
+        fi
+    } > "$file"
+}
+
+# 生成Markdown格式输出
+generate_markdown_output() {
+    local file="$1"
+    
+    if [[ "$SINGLE_RESULT_PAGE" == "true" ]]; then
+        # 单页增强版 - 包含统计分析和图表
+        {
+            echo "# 🚀 网络延迟测试完整报告"
+            echo ""
+            echo "---"
+            echo ""
+            echo "**📅 测试时间:** $(date '+%Y-%m-%d %H:%M:%S')  "
+            echo "**🖥️ 测试系统:** $OS_TYPE  "
+            echo "**📍 测试环境:** $(hostname 2>/dev/null || echo '本地主机')"
+            echo ""
+            echo "---"
+            echo ""
+            
+            # 统计分析
+            echo "## � 测试统计概览"
+            echo ""
+            local total_tests=${#RESULTS[@]}
+            local excellent_count=0
+            local good_count=0
+            local poor_count=0
+            
+            for result in "${RESULTS[@]}"; do
+                IFS='|' read -r service host latency status ipv4 ipv6 loss version <<< "$result"
+                if [[ "$status" == *"优秀"* ]]; then
+                    ((excellent_count++))
+                elif [[ "$status" == *"良好"* ]]; then
+                    ((good_count++))
+                else
+                    ((poor_count++))
+                fi
+            done
+            
+            echo "| 指标 | 数值 |"
+            echo "|------|------|"
+            echo "| ✅ 优秀节点 | $excellent_count / $total_tests |"
+            echo "| 🔸 良好节点 | $good_count / $total_tests |"
+            echo "| ❌ 较差节点 | $poor_count / $total_tests |"
+            echo ""
+            
+            # Ping/真连接测试结果
+            echo "## �📊 Ping/真连接延迟测试"
+            echo ""
+            echo "| 🏆 | 服务 | 域名 | ⏱️ 延迟 | 📉 丢包率 | 📍 状态 | 🌐 IPv4 |"
+            echo "|:---:|------|------|:------:|:--------:|:------:|---------|"
+            local rank=1
+            for result in "${RESULTS[@]}"; do
+                IFS='|' read -r service host latency status ipv4 ipv6 loss version <<< "$result"
+                local medal="🥇"
+                [[ $rank -eq 2 ]] && medal="🥈"
+                [[ $rank -eq 3 ]] && medal="🥉"
+                [[ $rank -gt 3 ]] && medal="$rank"
+                echo "| $medal | **$service** | \`$host\` | $latency | $loss | $status | \`$ipv4\` |"
+                ((rank++))
+            done
+            echo ""
+            
+            if [[ ${#DNS_RESULTS[@]} -gt 0 ]]; then
+                echo "## 🔍 DNS解析速度测试"
+                echo ""
+                echo "| 🏆 | DNS服务器 | IP地址 | ⏱️ 解析时间 | 📍 状态 |"
+                echo "|:---:|-----------|--------|:---------:|:------:|"
+                rank=1
+                for result in "${DNS_RESULTS[@]}"; do
+                    IFS='|' read -r dns_name server time status <<< "$result"
+                    local medal="🥇"
+                    [[ $rank -eq 2 ]] && medal="🥈"
+                    [[ $rank -eq 3 ]] && medal="🥉"
+                    [[ $rank -gt 3 ]] && medal="$rank"
+                    echo "| $medal | **$dns_name** | \`$server\` | $time | $status |"
+                    ((rank++))
+                done
+                echo ""
+            fi
+            
+            if [[ ${#DOWNLOAD_RESULTS[@]} -gt 0 ]]; then
+                echo "## 📥 下载速度测试"
+                echo ""
+                echo "| 测试点 | 🚀 速度 | 📍 状态 |"
+                echo "|--------|:------:|:------:|"
+                for result in "${DOWNLOAD_RESULTS[@]}"; do
+                    IFS='|' read -r name url speed status <<< "$result"
+                    echo "| **$name** | $speed | $status |"
+                done
+                echo ""
+            fi
+            
+            echo "---"
+            echo ""
+            echo "## 💡 延迟等级说明"
+            echo ""
+            echo "- ✅ **优秀** (< 50ms) - 适合游戏、视频通话"
+            echo "- 🔸 **良好** (50-150ms) - 适合网页浏览、视频"
+            echo "- ⚠️ **一般** (150-300ms) - 基础使用"
+            echo "- ❌ **较差** (> 300ms) - 网络质量差"
+            echo ""
+            echo "---"
+            echo ""
+            echo "> 💻 生成工具: [Network Latency Tester](https://github.com/Cd1s/network-latency-tester)"
+            echo ""
+        } > "$file"
+    else
+        # 标准简洁版
+        {
+            echo "# 网络延迟测试报告"
+            echo ""
+            echo "**测试时间:** $(date '+%Y-%m-%d %H:%M:%S')"
+            echo ""
+            echo "## 📊 Ping/真连接测试结果"
+            echo ""
+            echo "| 排名 | 服务 | 域名 | 延迟 | 丢包率 | 状态 |"
+            echo "|------|------|------|------|--------|------|"
+            local rank=1
+            for result in "${RESULTS[@]}"; do
+                IFS='|' read -r service host latency status ipv4 ipv6 loss version <<< "$result"
+                echo "| $rank | $service | $host | $latency | $loss | $status |"
+                ((rank++))
+            done
+            echo ""
+            
+            if [[ ${#DNS_RESULTS[@]} -gt 0 ]]; then
+                echo "## 🔍 DNS解析测试结果"
+                echo ""
+                echo "| 排名 | DNS服务器 | IP地址 | 解析时间 | 状态 |"
+                echo "|------|-----------|--------|----------|------|"
+                rank=1
+                for result in "${DNS_RESULTS[@]}"; do
+                    IFS='|' read -r dns_name server time status <<< "$result"
+                    echo "| $rank | $dns_name | $server | $time | $status |"
+                    ((rank++))
+                done
+                echo ""
+            fi
+            
+            if [[ ${#DOWNLOAD_RESULTS[@]} -gt 0 ]]; then
+                echo "## 📥 下载速度测试结果"
+                echo ""
+                echo "| 测试点 | 速度 | 状态 |"
+                echo "|--------|------|------|"
+                for result in "${DOWNLOAD_RESULTS[@]}"; do
+                    IFS='|' read -r name url speed status <<< "$result"
+                    echo "| $name | $speed | $status |"
+                done
+            fi
+        } > "$file"
+    fi
+}
+
+# 生成HTML格式输出
+generate_html_output() {
+    local file="$1"
+    
+    # 计算统计数据
+    local total_tests=${#RESULTS[@]}
+    local excellent_count=0
+    local good_count=0
+    local poor_count=0
+    
+    for result in "${RESULTS[@]}"; do
+        IFS='|' read -r service host latency status ipv4 ipv6 loss version <<< "$result"
+        if [[ "$status" == *"优秀"* ]]; then
+            ((excellent_count++))
+        elif [[ "$status" == *"良好"* ]]; then
+            ((good_count++))
+        else
+            ((poor_count++))
+        fi
+    done
+    
+    {
+        if [[ "$SINGLE_RESULT_PAGE" == "true" ]]; then
+            # 单页增强版 - 现代化设计
+            cat <<'HTML_HEADER'
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>网络延迟测试完整报告</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 20px; min-height: 100vh; }
+        .container { max-width: 1200px; margin: 0 auto; background: white; border-radius: 16px; box-shadow: 0 20px 60px rgba(0,0,0,0.3); overflow: hidden; }
+        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 40px; text-align: center; }
+        .header h1 { font-size: 2.5em; margin-bottom: 10px; }
+        .header .meta { font-size: 1em; opacity: 0.9; }
+        .content { padding: 40px; }
+        .stats { display: flex; justify-content: space-around; margin: 30px 0; }
+        .stat-card { flex: 1; margin: 0 10px; padding: 20px; background: #f8f9fa; border-radius: 12px; text-align: center; transition: transform 0.2s; }
+        .stat-card:hover { transform: translateY(-5px); box-shadow: 0 5px 15px rgba(0,0,0,0.1); }
+        .stat-card .number { font-size: 2em; font-weight: bold; margin: 10px 0; }
+        .stat-card .label { color: #666; font-size: 0.9em; }
+        .stat-card.excellent .number { color: #4CAF50; }
+        .stat-card.good .number { color: #FF9800; }
+        .stat-card.poor .number { color: #F44336; }
+        h2 { color: #333; margin: 40px 0 20px 0; padding-bottom: 10px; border-bottom: 3px solid #667eea; font-size: 1.8em; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
+        th { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 15px; text-align: left; font-weight: 600; }
+        td { padding: 12px 15px; border-bottom: 1px solid #f0f0f0; }
+        tr:hover { background: #f8f9fa; }
+        tr:last-child td { border-bottom: none; }
+        .rank { font-weight: bold; font-size: 1.2em; }
+        .rank.gold { color: #FFD700; }
+        .rank.silver { color: #C0C0C0; }
+        .rank.bronze { color: #CD7F32; }
+        .status { padding: 5px 12px; border-radius: 20px; font-size: 0.85em; font-weight: 600; display: inline-block; }
+        .status.excellent { background: #e8f5e9; color: #4CAF50; }
+        .status.good { background: #fff3e0; color: #FF9800; }
+        .status.poor { background: #ffebee; color: #F44336; }
+        .footer { background: #f8f9fa; padding: 30px; text-align: center; color: #666; }
+        .footer a { color: #667eea; text-decoration: none; font-weight: 600; }
+        .info-box { background: #e3f2fd; border-left: 4px solid #2196F3; padding: 15px; margin: 20px 0; border-radius: 4px; }
+        code { background: #f5f5f5; padding: 2px 6px; border-radius: 3px; font-family: 'Courier New', monospace; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🚀 网络延迟测试完整报告</h1>
+            <p class="meta">📅 测试时间: 
+HTML_HEADER
+            echo "$(date '+%Y-%m-%d %H:%M:%S') | 🖥️ 系统: $OS_TYPE | 📍 主机: $(hostname 2>/dev/null || echo '本地主机')</p>"
+            echo "</div>"
+            echo "<div class=\"content\">"
+            
+            # 统计卡片
+            echo "<div class=\"stats\">"
+            echo "<div class=\"stat-card excellent\"><div class=\"number\">$excellent_count</div><div class=\"label\">✅ 优秀节点</div></div>"
+            echo "<div class=\"stat-card good\"><div class=\"number\">$good_count</div><div class=\"label\">🔸 良好节点</div></div>"
+            echo "<div class=\"stat-card poor\"><div class=\"number\">$poor_count</div><div class=\"label\">❌ 较差节点</div></div>"
+            echo "<div class=\"stat-card\"><div class=\"number\">$total_tests</div><div class=\"label\">📊 测试总数</div></div>"
+            echo "</div>"
+            
+            # Ping测试结果
+            echo "<h2>📊 Ping/真连接延迟测试</h2>"
+            echo "<table><thead><tr><th style=\"width:60px;\">🏆 排名</th><th>服务</th><th>域名</th><th>⏱️ 延迟</th><th>📉 丢包率</th><th>📍 状态</th><th>🌐 IPv4地址</th></tr></thead><tbody>"
+            local rank=1
+            for result in "${RESULTS[@]}"; do
+                IFS='|' read -r service host latency status ipv4 ipv6 loss version <<< "$result"
+                local rank_class=""
+                local rank_display="$rank"
+                [[ $rank -eq 1 ]] && rank_class="gold" && rank_display="🥇"
+                [[ $rank -eq 2 ]] && rank_class="silver" && rank_display="🥈"
+                [[ $rank -eq 3 ]] && rank_class="bronze" && rank_display="🥉"
+                
+                local status_class="poor"
+                [[ "$status" == *"优秀"* ]] && status_class="excellent"
+                [[ "$status" == *"良好"* ]] && status_class="good"
+                
+                echo "<tr><td class=\"rank $rank_class\">$rank_display</td><td><strong>$service</strong></td><td><code>$host</code></td><td>$latency</td><td>$loss</td><td><span class=\"status $status_class\">$status</span></td><td><code>$ipv4</code></td></tr>"
+                ((rank++))
+            done
+            echo "</tbody></table>"
+            
+            # DNS测试结果
+            if [[ ${#DNS_RESULTS[@]} -gt 0 ]]; then
+                echo "<h2>🔍 DNS解析速度测试</h2>"
+                echo "<table><thead><tr><th style=\"width:60px;\">🏆 排名</th><th>DNS服务器</th><th>IP地址</th><th>⏱️ 解析时间</th><th>📍 状态</th></tr></thead><tbody>"
+                rank=1
+                for result in "${DNS_RESULTS[@]}"; do
+                    IFS='|' read -r dns_name server time status <<< "$result"
+                    local rank_display="$rank"
+                    [[ $rank -eq 1 ]] && rank_display="🥇"
+                    [[ $rank -eq 2 ]] && rank_display="🥈"
+                    [[ $rank -eq 3 ]] && rank_display="🥉"
+                    echo "<tr><td class=\"rank\">$rank_display</td><td><strong>$dns_name</strong></td><td><code>$server</code></td><td>$time</td><td>$status</td></tr>"
+                    ((rank++))
+                done
+                echo "</tbody></table>"
+            fi
+            
+            # 下载速度测试
+            if [[ ${#DOWNLOAD_RESULTS[@]} -gt 0 ]]; then
+                echo "<h2>📥 下载速度测试</h2>"
+                echo "<table><thead><tr><th>测试点</th><th>🚀 速度</th><th>📍 状态</th></tr></thead><tbody>"
+                for result in "${DOWNLOAD_RESULTS[@]}"; do
+                    IFS='|' read -r name url speed status <<< "$result"
+                    echo "<tr><td><strong>$name</strong></td><td>$speed</td><td>$status</td></tr>"
+                done
+                echo "</tbody></table>"
+            fi
+            
+            # 说明信息
+            echo "<div class=\"info-box\">"
+            echo "<h3 style=\"margin-bottom:10px;\">💡 延迟等级说明</h3>"
+            echo "<p><strong>✅ 优秀 (&lt; 50ms)</strong> - 适合游戏、视频通话<br>"
+            echo "<strong>🔸 良好 (50-150ms)</strong> - 适合网页浏览、视频<br>"
+            echo "<strong>⚠️ 一般 (150-300ms)</strong> - 基础使用<br>"
+            echo "<strong>❌ 较差 (&gt; 300ms)</strong> - 网络质量差</p>"
+            echo "</div>"
+            
+            echo "</div>"
+            echo "<div class=\"footer\">"
+            echo "<p>💻 生成工具: <a href=\"https://github.com/Cd1s/network-latency-tester\" target=\"_blank\">Network Latency Tester</a></p>"
+            echo "<p style=\"margin-top:10px;font-size:0.9em;\">此报告由自动化工具生成 | 数据仅供参考</p>"
+            echo "</div>"
+            echo "</div></body></html>"
+        else
+            # 标准简洁版
+            cat <<'HTML_HEADER'
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>网络延迟测试报告</title>
+    <style>
+        body { font-family: Arial, sans-serif; max-width: 1200px; margin: 0 auto; padding: 20px; background: #f5f5f5; }
+        .container { background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        h1 { color: #333; border-bottom: 3px solid #4CAF50; padding-bottom: 10px; }
+        h2 { color: #555; margin-top: 30px; }
+        table { width: 100%; border-collapse: collapse; margin: 20px 0; }
+        th { background: #4CAF50; color: white; padding: 12px; text-align: left; }
+        td { padding: 10px; border-bottom: 1px solid #ddd; }
+        tr:hover { background: #f5f5f5; }
+        .excellent { color: #4CAF50; font-weight: bold; }
+        .good { color: #FF9800; font-weight: bold; }
+        .poor { color: #F44336; font-weight: bold; }
+        .meta { color: #888; font-size: 14px; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🚀 网络延迟测试报告</h1>
+        <p class="meta">测试时间: 
+HTML_HEADER
+            echo "$(date '+%Y-%m-%d %H:%M:%S')</p>"
+            
+            echo "<h2>📊 Ping/真连接测试结果</h2>"
+            echo "<table><thead><tr><th>排名</th><th>服务</th><th>域名</th><th>延迟</th><th>丢包率</th><th>状态</th></tr></thead><tbody>"
+            local rank=1
+            for result in "${RESULTS[@]}"; do
+                IFS='|' read -r service host latency status ipv4 ipv6 loss version <<< "$result"
+                local status_class="poor"
+                [[ "$status" == *"优秀"* ]] && status_class="excellent"
+                [[ "$status" == *"良好"* ]] && status_class="good"
+                echo "<tr><td>$rank</td><td>$service</td><td>$host</td><td>$latency</td><td>$loss</td><td class='$status_class'>$status</td></tr>"
+                ((rank++))
+            done
+            echo "</tbody></table>"
+            
+            if [[ ${#DNS_RESULTS[@]} -gt 0 ]]; then
+                echo "<h2>🔍 DNS解析测试结果</h2>"
+                echo "<table><thead><tr><th>排名</th><th>DNS服务器</th><th>解析时间</th><th>状态</th></tr></thead><tbody>"
+                rank=1
+                for result in "${DNS_RESULTS[@]}"; do
+                    IFS='|' read -r dns_name server time status <<< "$result"
+                    echo "<tr><td>$rank</td><td>$dns_name</td><td>$time</td><td>$status</td></tr>"
+                    ((rank++))
+                done
+                echo "</tbody></table>"
+            fi
+            
+            echo "</div></body></html>"
+        fi
+    } > "$file"
+}
+
+# 生成JSON格式输出
+generate_json_output() {
+    local file="$1"
+    {
+        echo "{"
+        echo "  \"timestamp\": \"$(date -Iseconds)\","
+        echo "  \"ping_results\": ["
+        local first=true
+        for result in "${RESULTS[@]}"; do
+            IFS='|' read -r service host latency status ipv4 ipv6 loss version <<< "$result"
+            [[ "$first" == "false" ]] && echo ","
+            echo -n "    {\"service\": \"$service\", \"host\": \"$host\", \"latency\": \"$latency\", \"status\": \"$status\", \"packet_loss\": \"$loss\"}"
+            first=false
+        done
+        echo ""
+        echo "  ]"
+        if [[ ${#DNS_RESULTS[@]} -gt 0 ]]; then
+            echo "  ,\"dns_results\": ["
+            first=true
+            for result in "${DNS_RESULTS[@]}"; do
+                IFS='|' read -r dns_name server time status <<< "$result"
+                [[ "$first" == "false" ]] && echo ","
+                echo -n "    {\"dns_name\": \"$dns_name\", \"server\": \"$server\", \"time\": \"$time\", \"status\": \"$status\"}"
+                first=false
+            done
+            echo ""
+            echo "  ]"
+        fi
+        echo "}"
+    } > "$file"
+}
+
+# 解析命令行参数
+parse_arguments "$@"
 
 # 使用fping进行批量测试（跨平台兼容）
 test_batch_latency_fping() {
@@ -505,7 +1032,7 @@ declare -A FULL_SITES=(
     ["Netflix"]="fast.com"
     ["Disney"]="disneyplus.com"
     ["Instagram"]="instagram.com"
-    ["Telegram"]="tg.d1ss.eu.org"
+    ["Telegram"]="telegram_dc_test"
     ["OneDrive"]="onedrive.live.com"
     ["Twitch"]="twitch.tv"
     ["Pornhub"]="pornhub.com"
@@ -662,39 +1189,87 @@ test_dns_resolution() {
     echo ""
 }
 
-# 测试下载速度
+# 测试下载速度 - 5秒采样重写版本
 test_download_speed() {
     local name=$1
     local url=$2
+    local duration=${3:-5}  # 默认5秒测试
     
-    echo -n -e "📥 测试 ${CYAN}${name}${NC} 下载速度... "
+    echo -n -e "📥 测试 ${CYAN}${name}${NC} 下载速度 (${duration}秒采样)... "
     
-    # 使用curl测试下载速度，10秒测试时间
-    local speed_output
+    # 创建临时文件
+    local temp_output="/tmp/download_test_$$"
+    local temp_progress="/tmp/download_progress_$$"
+    
+    # 使用curl进行流式下载，记录每秒速度
     local timeout_cmd=$(get_timeout_cmd)
     
+    # 启动后台下载进程
     if [[ -n "$timeout_cmd" ]]; then
-        speed_output=$($timeout_cmd 12 curl -o /dev/null -s -w '%{speed_download}' --max-time 10 --connect-timeout 4 "$url" 2>/dev/null || echo "0")
+        $timeout_cmd $((duration + 2)) curl -o "$temp_output" -# "$url" --max-time $duration --connect-timeout 4 2>&1 | \
+        while IFS= read -r line; do
+            echo "$line" >> "$temp_progress"
+        done &
     else
-        # macOS没有timeout命令时，直接使用curl的超时参数
-        speed_output=$(curl -o /dev/null -s -w '%{speed_download}' --max-time 10 --connect-timeout 4 "$url" 2>/dev/null || echo "0")
+        curl -o "$temp_output" -# "$url" --max-time $duration --connect-timeout 4 2>&1 | \
+        while IFS= read -r line; do
+            echo "$line" >> "$temp_progress"
+        done &
     fi
     
-    if [[ "$speed_output" =~ ^[0-9]+\.?[0-9]*$ ]] && [ "$(echo "$speed_output > 0" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
-        # 转换为更易读的格式
-        local speed_mbps=$(echo "scale=2; $speed_output / 1048576" | bc -l 2>/dev/null)
-        if [ "$(echo "$speed_mbps > 0.1" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
-            echo -e "${GREEN}${speed_mbps} MB/s ⚡${NC}"
-            DOWNLOAD_RESULTS+=("${name}|${url}|${speed_mbps} MB/s|成功")
+    local curl_pid=$!
+    
+    # 采样过程
+    local samples=0
+    local total_bytes=0
+    local max_speed=0
+    local prev_size=0
+    
+    for ((i=0; i<duration; i++)); do
+        sleep 1
+        if [[ -f "$temp_output" ]]; then
+            local current_size=$(stat -f%z "$temp_output" 2>/dev/null || stat -c%s "$temp_output" 2>/dev/null || echo "0")
+            local bytes_this_sec=$((current_size - prev_size))
+            
+            if [[ $bytes_this_sec -gt 0 ]]; then
+                total_bytes=$((total_bytes + bytes_this_sec))
+                ((samples++))
+                
+                # 计算瞬时速度
+                local instant_speed_mbps=$(echo "scale=2; $bytes_this_sec / 1048576" | bc -l 2>/dev/null || echo "0")
+                
+                # 更新最大速度
+                if (( $(echo "$instant_speed_mbps > $max_speed" | bc -l 2>/dev/null || echo 0) )); then
+                    max_speed=$instant_speed_mbps
+                fi
+            fi
+            
+            prev_size=$current_size
+        fi
+    done
+    
+    # 等待curl完成
+    wait $curl_pid 2>/dev/null
+    
+    # 计算平均速度
+    if [[ $samples -gt 0 ]] && [[ $total_bytes -gt 0 ]]; then
+        local avg_speed_mbps=$(echo "scale=2; $total_bytes / $samples / 1048576" | bc -l 2>/dev/null || echo "0")
+        
+        if (( $(echo "$avg_speed_mbps > 0.1" | bc -l 2>/dev/null || echo 0) )); then
+            echo -e "${GREEN}平均 ${avg_speed_mbps} MB/s, 峰值 ${max_speed} MB/s ⚡${NC}"
+            DOWNLOAD_RESULTS+=("${name}|${url}|平均${avg_speed_mbps}MB/s 峰值${max_speed}MB/s|成功")
         else
-            local speed_kbps=$(echo "scale=0; $speed_output / 1024" | bc -l 2>/dev/null)
-            echo -e "${YELLOW}${speed_kbps} KB/s 🐌${NC}"
-            DOWNLOAD_RESULTS+=("${name}|${url}|${speed_kbps} KB/s|慢速")
+            local avg_speed_kbps=$(echo "scale=0; $total_bytes / $samples / 1024" | bc -l 2>/dev/null || echo "0")
+            echo -e "${YELLOW}平均 ${avg_speed_kbps} KB/s 🐌${NC}"
+            DOWNLOAD_RESULTS+=("${name}|${url}|${avg_speed_kbps} KB/s|慢速")
         fi
     else
-        echo -e "${RED}失败 ❌${NC}"
+        echo -e "${RED}失败 (采样不足) ❌${NC}"
         DOWNLOAD_RESULTS+=("${name}|${url}|失败|失败")
     fi
+    
+    # 清理临时文件
+    rm -f "$temp_output" "$temp_progress" 2>/dev/null
 }
 
 # 测试丢包率
@@ -807,6 +1382,92 @@ test_tcp_latency() {
         echo $((total_time / successful_connects))
     else
         echo "999999"
+    fi
+}
+
+# Telegram DC检测 - 使用官方API获取节点并测试TCP连接
+test_telegram_connectivity() {
+    local service=$1
+    
+    echo -n -e "🔍 ${CYAN}$(printf "%-12s" "$service")${NC} "
+    
+    # 检查是否有Python环境
+    if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+        echo -e "${RED}需要Python环境 ❌${NC}"
+        RESULTS+=("$service|Telegram DC Test|N/A|需要Python|N/A|N/A|N/A|N/A")
+        return
+    fi
+    
+    # 使用Python检测Telegram节点
+    local python_cmd="python3"
+    if ! command -v python3 >/dev/null 2>&1; then
+        python_cmd="python"
+    fi
+    
+    # 执行Telegram节点检测
+    local tg_result=$($python_cmd - <<'PYTHON_EOF'
+import re, socket, time, sys
+try:
+    import urllib.request
+    url = "https://core.telegram.org/getProxyConfig"
+    data = urllib.request.urlopen(url, timeout=5).read().decode("utf-8")
+    pattern = re.compile(r'proxy_for\s+(-?\d+)\s+([\d.]+):(\d+);')
+    entries = pattern.findall(data)
+    
+    dcs = {}
+    for dc, ip, port in entries:
+        dc_id = abs(int(dc))
+        dcs.setdefault(dc_id, []).append((ip, int(port)))
+    
+    best_latency = 999999
+    best_node = None
+    
+    for dc_id, nodes in dcs.items():
+        for ip, port in nodes[:3]:  # 每个DC测试前3个节点
+            try:
+                start = time.time()
+                sock = socket.create_connection((ip, port), timeout=1.5)
+                latency = round((time.time() - start) * 1000, 2)
+                sock.close()
+                if latency < best_latency:
+                    best_latency = latency
+                    best_node = f"{ip}:{port}|DC{dc_id}"
+            except:
+                pass
+    
+    if best_node:
+        print(f"SUCCESS|{best_node}|{best_latency}")
+    else:
+        print("FAILED")
+except Exception as e:
+    print(f"ERROR|{str(e)}")
+PYTHON_EOF
+)
+    
+    # 解析结果
+    if [[ "$tg_result" == SUCCESS* ]]; then
+        IFS='|' read -r status node dc latency <<< "$tg_result"
+        
+        local latency_int=${latency%.*}
+        local status_text=""
+        local status_colored=""
+        
+        if [[ $latency_int -lt 50 ]]; then
+            status_text="优秀"
+            status_colored="${GREEN}✅优秀${NC}"
+        elif [[ $latency_int -lt 150 ]]; then
+            status_text="良好"
+            status_colored="${YELLOW}🔸良好${NC}"
+        else
+            status_text="较差"
+            status_colored="${RED}⚠️较差${NC}"
+        fi
+        
+        echo -e "$(printf "%-8s %-15s %-8s" "$dc" "$node" "${latency}ms") $status_colored"
+        RESULTS+=("$service|$node|${latency}ms|$status_text|$node|N/A|0%|$dc")
+    else
+        echo -e "${RED}检测失败 ❌${NC}"
+        RESULTS+=("$service|Telegram DC Test|超时|失败|N/A|N/A|N/A|N/A")
     fi
 }
 
@@ -1139,7 +1800,12 @@ run_test() {
     # 执行详细测试
     for service in "${!FULL_SITES[@]}"; do
         host="${FULL_SITES[$service]}"
-        test_site_latency "$host" "$service"
+        # 特殊处理Telegram检测
+        if [[ "$host" == "telegram_dc_test" ]]; then
+            test_telegram_connectivity "$service"
+        else
+            test_site_latency "$host" "$service"
+        fi
     done
     
     local end_time=$(date +%s)
@@ -1194,7 +1860,7 @@ run_dns_test() {
                 
                 local fping_output=$(fping -c 10 -t 2000 -q "${dns_hosts[@]}" 2>&1)
                 
-                # 显示DNS服务器延迟结果表格 - 使用column命令对齐
+                # 显示DNS服务器延迟结果表格 - 使用新对齐系统
                 declare -a dns_latency_results=()
                 
                 for i in "${!dns_host_names[@]}"; do
@@ -1242,44 +1908,45 @@ run_dns_test() {
                                 score=$((latency_int + loss * 10))
                             fi
                             
-                            dns_latency_results+=("$score|$dns_name|$ip|${avg}ms|${loss}%($status)")
+                            dns_latency_results+=("$score|$dns_name|$ip|${avg}ms|${loss}%|$status")
                         else
-                            dns_latency_results+=("9999|$dns_name|$ip|解析失败|100%(失败)")
+                            dns_latency_results+=("9999|$dns_name|$ip|解析失败|100%|失败")
                         fi
                     else
-                        dns_latency_results+=("9999|$dns_name|$ip|超时|100%(超时)")
+                        dns_latency_results+=("9999|$dns_name|$ip|超时|100%|超时")
                     fi
                 done
                 
-                # 显示表格
+                # 显示表格 - 使用format_row
                 echo ""
-                printf "%-4s %-15s %-20s %-12s %-8s\n" "排名" "DNS服务器" "IP地址" "平均延迟" "丢包率"
-                echo "─────────────────────────────────────────────────────────────────────────"
+                format_row "排名:4:right" "DNS服务器:18:left" "IP地址:20:left" "平均延迟:10:right" "丢包率:8:right" "状态:10:left"
+                echo "═════════════════════════════════════════════════════════════════════════════════"
                 
                 # 排序并显示结果
                 IFS=$'\n' sorted_results=($(printf '%s\n' "${dns_latency_results[@]}" | sort -t'|' -k1 -n))
                 
                 local rank=1
                 for result in "${sorted_results[@]}"; do
-                    IFS='|' read -r score dns_name ip latency status <<< "$result"
+                    IFS='|' read -r score dns_name ip latency loss status <<< "$result"
                     
-                    # 提取状态颜色
+                    # 提取状态颜色 - 使用统一图标系统
                     local status_colored=""
-                    if [[ "$status" == *"优秀"* ]]; then
-                        status_colored="${GREEN}✅ 优秀${NC}"
-                    elif [[ "$status" == *"良好"* ]]; then
-                        status_colored="${YELLOW}✅ 良好${NC}"
-                    elif [[ "$status" == *"一般"* ]]; then
-                        status_colored="${PURPLE}⚠️ 一般${NC}"
-                    elif [[ "$status" == *"较差"* ]]; then
-                        status_colored="${RED}❌ 较差${NC}"
-                    elif [[ "$status" == *"差"* ]]; then
-                        status_colored="${RED}❌ 差${NC}"
+                    if [[ "$status" == "优秀" ]]; then
+                        status_colored="${GREEN}✅优秀${NC}"
+                    elif [[ "$status" == "良好" ]]; then
+                        status_colored="${YELLOW}🔸良好${NC}"
+                    elif [[ "$status" == "一般" ]]; then
+                        status_colored="${PURPLE}⚠️一般${NC}"
+                    elif [[ "$status" == "较差" ]]; then
+                        status_colored="${RED}❌较差${NC}"
+                    elif [[ "$status" == "差" ]]; then
+                        status_colored="${RED}❌差${NC}"
                     else
-                        status_colored="${RED}❌ 失败${NC}"
+                        status_colored="${RED}❌失败${NC}"
                     fi
                     
-                    print_aligned_row "$rank" "$dns_name" "$ip" "$latency" "$status_colored"
+                    # 使用format_row统一输出
+                    format_row "$rank:4:right" "$dns_name:18:left" "$ip:20:left" "$latency:10:right" "$loss:8:right" "$status_colored:10:left"
                     ((rank++))
                 done
                 
@@ -1343,12 +2010,12 @@ run_dns_test() {
                     fi
                 done
                 
-                # 按解析时间排序并显示
+                # 按解析时间排序并显示 - 使用新对齐系统
                 echo ""
                 echo "📊 DNS解析速度测试结果"
-                echo "─────────────────────────────────────────────────────────────────────────"
-                printf "%-4s %-15s %-20s %-12s %-8s\n" "排名" "DNS服务器" "IP地址" "解析时间" "状态"
-                echo "─────────────────────────────────────────────────────────────────────────"
+                echo "═════════════════════════════════════════════════════════════════════════════════"
+                format_row "排名:4:right" "DNS服务器:18:left" "IP地址:20:left" "解析时间:12:right" "状态:10:left"
+                echo "═════════════════════════════════════════════════════════════════════════════════"
                 
                 # 排序并显示结果
                 IFS=$'\n' sorted_results=($(printf '%s\n' "${dns_resolution_results[@]}" | sort -t'|' -k1 -n))
@@ -1357,18 +2024,19 @@ run_dns_test() {
                 for result in "${sorted_results[@]}"; do
                     IFS='|' read -r time dns_name server resolution_time status <<< "$result"
                     
-                    # 根据状态着色并添加图标
+                    # 根据状态着色并添加统一图标
                     local status_colored=""
                     case "$status" in
-                        "优秀") status_colored="${GREEN}优秀${NC}" ;;
-                        "良好") status_colored="${YELLOW}良好${NC}" ;;
-                        "一般") status_colored="${PURPLE}一般${NC}" ;;
-                        "较差") status_colored="${RED}较差${NC}" ;;
-                        "失败") status_colored="${RED}失败${NC}" ;;
-                        *) status_colored="${RED}失败${NC}" ;;
+                        "优秀") status_colored="${GREEN}✅优秀${NC}" ;;
+                        "良好") status_colored="${YELLOW}🔸良好${NC}" ;;
+                        "一般") status_colored="${PURPLE}⚠️一般${NC}" ;;
+                        "较差") status_colored="${RED}❌较差${NC}" ;;
+                        "失败") status_colored="${RED}❌失败${NC}" ;;
+                        *) status_colored="${RED}❌失败${NC}" ;;
                     esac
                     
-                    print_aligned_row "$rank" "$dns_name" "$server" "$resolution_time" "$status_colored"
+                    # 使用format_row统一输出
+                    format_row "$rank:4:right" "$dns_name:18:left" "$server:20:left" "$resolution_time:12:right" "$status_colored:10:left"
                     ((rank++))
                 done
                 
@@ -1869,11 +2537,12 @@ show_results() {
     echo -e "${GREEN}📊 测试完成！${NC} 总时间: ${YELLOW}${total_time}秒${NC}"
     echo ""
     
-    # 生成表格
+    # 生成表格 - 使用新的对齐系统
     echo -e "${CYAN}📋 延迟测试结果表格:${NC}"
-    echo -e "${BLUE}─────────────────────────────────────────────────────────────────────────────────────────────${NC}"
-    printf "%-3s %-12s %-25s %-12s %-8s %-15s %-15s %-8s\n" "排名" "服务" "域名" "延迟" "状态" "IPv4地址" "IPv6地址" "版本"
-    echo -e "${BLUE}─────────────────────────────────────────────────────────────────────────────────────────────${NC}"
+    echo -e "${BLUE}═══════════════════════════════════════════════════════════════════════════════════════════════${NC}"
+    # 使用format_row输出表头
+    format_row "排名:4:right" "服务:15:left" "域名:25:left" "延迟:10:right" "丢包率:8:right" "状态:10:left" "IPv4地址:16:left" "版本:8:left"
+    echo -e "${BLUE}═══════════════════════════════════════════════════════════════════════════════════════════════${NC}"
     
     # 排序结果
     declare -a sorted_results=()
@@ -1890,38 +2559,66 @@ show_results() {
     # 按延迟排序成功的结果
     IFS=$'\n' sorted_results=($(printf '%s\n' "${sorted_results[@]}" | sort -t'|' -k3 -n))
     
-    # 显示成功的结果
+    # 显示成功的结果 - 使用新的对齐系统
     local rank=1
     for result in "${sorted_results[@]}"; do
         IFS='|' read -r service host latency status ipv4_addr ipv6_addr packet_loss version <<< "$result"
         
         local status_colored=""
+        local status_icon=""
         case "$status" in
-            "优秀") status_colored="${GREEN}🟢 $status${NC}" ;;
-            "良好") status_colored="${YELLOW}🟡 $status${NC}" ;;
-            "较差") status_colored="${RED}🔴 $status${NC}" ;;
-            "很差") status_colored="${RED}💀 $status${NC}" ;;
-            *) status_colored="$status" ;;
+            "优秀") 
+                status_colored="${GREEN}✅优秀${NC}"
+                status_icon="✅"
+                ;;
+            "良好") 
+                status_colored="${YELLOW}�良好${NC}"
+                status_icon="🔸"
+                ;;
+            "较差") 
+                status_colored="${RED}⚠️较差${NC}"
+                status_icon="⚠️"
+                ;;
+            "很差") 
+                status_colored="${RED}❌很差${NC}"
+                status_icon="❌"
+                ;;
+            *) 
+                status_colored="$status"
+                status_icon=""
+                ;;
         esac
         
-        # 截断过长的IP地址显示
-        local ipv4_display="$ipv4_addr"
-        local ipv6_display="$ipv6_addr"
-        if [ ${#ipv4_addr} -gt 15 ]; then
-            ipv4_display="${ipv4_addr:0:12}..."
-        fi
-        if [ ${#ipv6_addr} -gt 15 ]; then
-            ipv6_display="${ipv6_addr:0:12}..."
+        # 格式化延迟显示（确保右对齐）
+        local latency_display="$latency"
+        if [[ "$latency" =~ ^[0-9]+\.?[0-9]*ms$ ]]; then
+            latency_display="$latency"
         fi
         
-        echo -e "$(printf "%2d. %-10s %-25s %-12s %-15s %-15s %-15s %s" "$rank" "$service" "$host" "$latency" "$status_colored" "$ipv4_display" "$ipv6_display" "${version:-IPv4}")"
+        # 格式化丢包率显示
+        local loss_display="${packet_loss:-0%}"
+        
+        # 截断过长的IP地址
+        local ipv4_display="$ipv4_addr"
+        if [ ${#ipv4_addr} -gt 15 ]; then
+            ipv4_display="${ipv4_addr:0:13}..."
+        fi
+        
+        # 使用format_row统一输出
+        format_row "$rank:4:right" "$service:15:left" "$host:25:left" "$latency_display:10:right" "$loss_display:8:right" "$status_colored:10:left" "$ipv4_display:16:left" "${version:-IPv4}:8:left"
         ((rank++))
     done
     
-    # 显示失败的结果
+    # 显示失败的结果 - 使用新的对齐系统
     for result in "${failed_results[@]}"; do
         IFS='|' read -r service host latency status ipv4_addr ipv6_addr packet_loss version <<< "$result"
-        echo -e "$(printf "%2d. %-10s %-25s %-12s" "$rank" "$service" "$host" "$latency") ${RED}❌ $status${NC} $(printf "%-15s %-15s %-8s %s" "${ipv4_addr:-N/A}" "${ipv6_addr:-N/A}" "${packet_loss:-N/A}" "${version:-IPv4}")"
+        
+        local status_display="${RED}❌${status}${NC}"
+        local loss_display="${packet_loss:-N/A}"
+        local ipv4_display="${ipv4_addr:-N/A}"
+        
+        # 使用format_row统一输出
+        format_row "$rank:4:right" "$service:15:left" "$host:25:left" "$latency:10:right" "$loss_display:8:right" "$status_display:10:left" "$ipv4_display:16:left" "${version:-IPv4}:8:left"
         ((rank++))
     done
     
@@ -2576,45 +3273,65 @@ test_ip_latency() {
         return
     fi
     
+    # 简化ping命令，直接使用ping，不需要复杂的版本判断
+    local ping_cmd="ping"
+    
+    # 检查是否有fping，fping更快更可靠
+    if command -v fping >/dev/null 2>&1; then
+        local fping_result=$(fping -c $count -t 1000 -q "$ip" 2>&1 | tail -1)
+        if [[ -n "$fping_result" ]] && echo "$fping_result" | grep -q "min/avg/max\|avg/max"; then
+            # macOS格式: min/avg/max = 1.23/2.34/3.45 ms
+            # Linux格式: 1.23/2.34/3.45/0.12 ms
+            local avg_latency=$(echo "$fping_result" | sed -n 's/.*[=:] *[0-9.]*\/\([0-9.]*\)\/.*/\1/p')
+            if [[ "$avg_latency" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                echo "$avg_latency"
+                return
+            fi
+        fi
+    fi
+    
+    # 回退到标准ping
     local total_time=0
     local successful_pings=0
-    local ping_cmd=$(get_ping_cmd "4" "$ip")
-    local interval=$(get_ping_interval)
-    local timeout_cmd=$(get_timeout_cmd)
     
     for ((i=1; i<=count; i++)); do
         local ping_result=""
-        if [[ -n "$timeout_cmd" ]]; then
-            if [[ -n "$interval" ]]; then
-                ping_result=$($timeout_cmd 5 $ping_cmd -c 1 $interval "$ip" 2>/dev/null || true)
-            else
-                ping_result=$($timeout_cmd 5 $ping_cmd -c 1 "$ip" 2>/dev/null || true)
-            fi
+        
+        # 根据操作系统使用不同的ping参数
+        if [[ "$OS_TYPE" == "macos" ]]; then
+            # macOS: ping -c 1 -W 2000 (timeout in milliseconds)
+            ping_result=$(ping -c 1 -W 2 "$ip" 2>/dev/null || true)
         else
-            if [[ -n "$interval" ]]; then
-                ping_result=$($ping_cmd -c 1 $interval "$ip" 2>/dev/null || true)
-            else
-                ping_result=$($ping_cmd -c 1 "$ip" 2>/dev/null || true)
-            fi
+            # Linux: ping -c 1 -W 2 (timeout in seconds)
+            ping_result=$(ping -c 1 -W 2 "$ip" 2>/dev/null || true)
         fi
         
-        if [[ -n "$ping_result" ]]; then
+        if [[ -n "$ping_result" ]] && echo "$ping_result" | grep -q "time="; then
             local ping_ms=""
-            if [[ "$OS_TYPE" == "macos" ]]; then
-                ping_ms=$(echo "$ping_result" | grep 'round-trip' | cut -d'=' -f2 | cut -d'/' -f2 2>/dev/null || echo "")
-            else
-                ping_ms=$(echo "$ping_result" | grep 'time=' | sed 's/.*time=\([0-9.]*\).*/\1/' 2>/dev/null || echo "")
-            fi
             
-            if [[ "$ping_ms" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-                total_time=$(echo "$total_time + $ping_ms" | bc -l 2>/dev/null || echo "$total_time")
+            # 提取时间，兼容多种格式
+            # 格式: time=12.3 ms 或 time=12.3ms
+            ping_ms=$(echo "$ping_result" | grep -oP 'time=\K[0-9.]+' 2>/dev/null || \
+                      echo "$ping_result" | grep -o 'time=[0-9.]*' | cut -d'=' -f2 2>/dev/null || echo "")
+            
+            if [[ -n "$ping_ms" ]] && [[ "$ping_ms" =~ ^[0-9]+\.?[0-9]*$ ]]; then
+                if command -v bc >/dev/null 2>&1; then
+                    total_time=$(echo "$total_time + $ping_ms" | bc -l 2>/dev/null || echo "$total_time")
+                else
+                    # 如果没有bc，使用awk
+                    total_time=$(awk "BEGIN {print $total_time + $ping_ms}" 2>/dev/null || echo "$total_time")
+                fi
                 ((successful_pings++))
             fi
         fi
     done
     
     if [ $successful_pings -gt 0 ]; then
-        echo "scale=1; $total_time / $successful_pings" | bc -l 2>/dev/null || echo "999999"
+        if command -v bc >/dev/null 2>&1; then
+            echo "scale=1; $total_time / $successful_pings" | bc -l 2>/dev/null || echo "999999"
+        else
+            awk "BEGIN {printf \"%.1f\", $total_time / $successful_pings}" 2>/dev/null || echo "999999"
+        fi
     else
         echo "999999"
     fi
@@ -2662,10 +3379,20 @@ run_dns_comprehensive_analysis() {
             echo -n "  └─ $domain: "
             
             # 测试DNS解析速度
-            local start_time=$(date +%s%N)
+            local start_time=$(date +%s 2>/dev/null || echo 0)
             local resolved_ip=$(resolve_with_dns "$domain" "$dns_server")
-            local end_time=$(date +%s%N)
-            local resolution_time=$(( (end_time - start_time) / 1000000 ))
+            local end_time=$(date +%s 2>/dev/null || echo 0)
+            local resolution_time=$((end_time - start_time))
+            
+            # 如果时间差为0，使用毫秒级测量（如果支持）
+            if [[ $resolution_time -eq 0 ]]; then
+                start_time=$(date +%s%3N 2>/dev/null || date +%s 2>/dev/null || echo 0)
+                resolved_ip=$(resolve_with_dns "$domain" "$dns_server")
+                end_time=$(date +%s%3N 2>/dev/null || date +%s 2>/dev/null || echo 0)
+                resolution_time=$((end_time - start_time))
+            else
+                resolution_time=$((resolution_time * 1000))
+            fi
             
             if [[ -n "$resolved_ip" && "$resolved_ip" != "N/A" ]]; then
                 total_resolution_time=$((total_resolution_time + resolution_time))
@@ -2673,12 +3400,25 @@ run_dns_comprehensive_analysis() {
                 
                 echo -n "${resolved_ip} (解析${resolution_time}ms) "
                 
-                # 测试IP延迟
-                local ping_latency=$(test_ip_latency "$resolved_ip" 3)
+                # 测试IP延迟 - 减少测试次数加快速度
+                local ping_latency=$(test_ip_latency "$resolved_ip" 2)
+                
+                # 调试输出
+                # echo "[DEBUG] ping_latency=$ping_latency" >&2
+                
                 if [[ "$ping_latency" != "999999" ]] && [[ "$ping_latency" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-                    total_ping_time=$(echo "$total_ping_time + $ping_latency" | bc -l 2>/dev/null || echo "$total_ping_time")
+                    # 使用awk代替bc，更可靠
+                    if command -v awk >/dev/null 2>&1; then
+                        total_ping_time=$(awk "BEGIN {print $total_ping_time + $ping_latency}")
+                    elif command -v bc >/dev/null 2>&1; then
+                        total_ping_time=$(echo "$total_ping_time + $ping_latency" | bc -l 2>/dev/null || echo "$total_ping_time")
+                    else
+                        # 没有awk或bc，使用整数运算（丢失小数）
+                        local ping_int=${ping_latency%.*}
+                        total_ping_time=$((total_ping_time + ping_int))
+                    fi
                     ((successful_pings++))
-                    echo -e "${GREEN}ping${ping_latency}ms ✅${NC}"
+                    echo -e "${GREEN}ping ${ping_latency}ms ✅${NC}"
                 else
                     echo -e "${RED}ping失败 ❌${NC}"
                 fi
@@ -2698,7 +3438,15 @@ run_dns_comprehensive_analysis() {
         fi
         
         if [ $successful_pings -gt 0 ]; then
-            avg_ping_time=$(echo "scale=1; $total_ping_time / $successful_pings" | bc -l 2>/dev/null || echo "9999")
+            # 优先使用awk，更可靠
+            if command -v awk >/dev/null 2>&1; then
+                avg_ping_time=$(awk "BEGIN {printf \"%.1f\", $total_ping_time / $successful_pings}")
+            elif command -v bc >/dev/null 2>&1; then
+                avg_ping_time=$(echo "scale=1; $total_ping_time / $successful_pings" | bc -l 2>/dev/null || echo "9999")
+            else
+                # 回退到整数除法
+                avg_ping_time=$((total_ping_time / successful_pings))
+            fi
         else
             avg_ping_time=9999
         fi
@@ -2821,20 +3569,30 @@ run_dns_comprehensive_analysis() {
         ((rank++))
     done
     
-    # 使用printf对齐并着色显示
+    # 使用format_row对齐并着色显示
+    local is_header=true
     while IFS='|' read -r dns_name display_server avg_resolution_time avg_ping_time composite_score status; do
-        if [[ "$dns_name" == "DNS服务器" ]]; then
-            printf "${CYAN}%-15s %-20s %-12s %-12s %-8s %-8s${NC}\n" "$dns_name" "$display_server" "$avg_resolution_time" "$avg_ping_time" "$composite_score" "$status"
-        elif echo "$status" | grep -q "优秀"; then
-            printf "${GREEN}%-15s %-20s %-12s %-12s %-8s %-8s${NC}\n" "$dns_name" "$display_server" "$avg_resolution_time" "$avg_ping_time" "$composite_score" "$status"
-        elif echo "$status" | grep -q "良好"; then
-            printf "${YELLOW}%-15s %-20s %-12s %-12s %-8s %-8s${NC}\n" "$dns_name" "$display_server" "$avg_resolution_time" "$avg_ping_time" "$composite_score" "$status"
-        elif echo "$status" | grep -q "一般"; then
-            printf "${PURPLE}%-15s %-20s %-12s %-12s %-8s %-8s${NC}\n" "$dns_name" "$display_server" "$avg_resolution_time" "$avg_ping_time" "$composite_score" "$status"
-        elif echo "$status" | grep -q "较差\|失败"; then
-            printf "${RED}%-15s %-20s %-12s %-12s %-8s %-8s${NC}\n" "$dns_name" "$display_server" "$avg_resolution_time" "$avg_ping_time" "$composite_score" "$status"
+        if [[ "$is_header" == "true" ]]; then
+            # 输出表头
+            format_row "$dns_name:18:left" "$display_server:20:left" "$avg_resolution_time:12:right" "$avg_ping_time:12:right" "$composite_score:8:right" "$status:10:left"
+            is_header=false
         else
-            printf "%-15s %-20s %-12s %-12s %-8s %-8s\n" "$dns_name" "$display_server" "$avg_resolution_time" "$avg_ping_time" "$composite_score" "$status"
+            # 根据状态着色并添加统一图标
+            local status_colored=""
+            if echo "$status" | grep -q "优秀"; then
+                status_colored="${GREEN}✅优秀${NC}"
+            elif echo "$status" | grep -q "良好"; then
+                status_colored="${YELLOW}🔸良好${NC}"
+            elif echo "$status" | grep -q "一般"; then
+                status_colored="${PURPLE}⚠️一般${NC}"
+            elif echo "$status" | grep -q "较差\|失败"; then
+                status_colored="${RED}❌${status}${NC}"
+            else
+                status_colored="$status"
+            fi
+            
+            # 使用format_row输出数据行
+            format_row "$dns_name:18:left" "$display_server:20:left" "$avg_resolution_time:12:right" "$avg_ping_time:12:right" "$composite_score:8:right" "$status_colored:10:left"
         fi
     done < "$temp_table"
     
@@ -2868,3 +3626,8 @@ run_dns_comprehensive_analysis() {
 
 # 运行主程序
 main
+
+# 生成输出文件（如果启用）
+if [[ "$ENABLE_OUTPUT" == "true" && -n "$OUTPUT_FILE" ]]; then
+    generate_output_file "$OUTPUT_FILE" "$OUTPUT_FORMAT"
+fi
