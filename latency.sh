@@ -141,6 +141,11 @@ OUTPUT_FORMAT="text"  # 输出格式: text/markdown/html/json
 ENABLE_OUTPUT=true  # 是否启用文件输出
 SINGLE_RESULT_PAGE=false  # 是否生成单页结果
 
+# Telegram测试缓存
+TELEGRAM_BEST_IP=""  # Telegram最佳IP
+TELEGRAM_BEST_DC=""  # Telegram最佳DC号
+TELEGRAM_BEST_LATENCY=""  # Telegram最佳延迟
+
 # 检测操作系统类型
 detect_os() {
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -771,12 +776,118 @@ test_batch_latency_fping() {
     echo "$temp_results"
 }
 
+# 在fping阶段测试Telegram并缓存结果
+test_telegram_in_fping() {
+    # 检查Python环境
+    if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+        TELEGRAM_BEST_IP=""
+        TELEGRAM_BEST_DC=""
+        TELEGRAM_BEST_LATENCY="N/A"
+        return
+    fi
+    
+    local python_cmd="python3"
+    if ! command -v python3 >/dev/null 2>&1; then
+        python_cmd="python"
+    fi
+    
+    # 获取所有Telegram DC节点IP
+    local tg_nodes=$($python_cmd - <<'PYTHON_EOF'
+import re
+try:
+    import urllib.request
+    url = "https://core.telegram.org/getProxyConfig"
+    data = urllib.request.urlopen(url, timeout=5).read().decode("utf-8")
+    pattern = re.compile(r'proxy_for\s+(-?\d+)\s+([\d.]+):(\d+);')
+    entries = pattern.findall(data)
+    
+    seen_ips = set()
+    for dc, ip, port in entries:
+        if ip not in seen_ips:
+            dc_id = abs(int(dc))
+            print(f"{ip}|DC{dc_id}")
+            seen_ips.add(ip)
+except:
+    pass
+PYTHON_EOF
+)
+    
+    if [[ -z "$tg_nodes" ]]; then
+        TELEGRAM_BEST_IP=""
+        TELEGRAM_BEST_DC=""
+        TELEGRAM_BEST_LATENCY="N/A"
+        return
+    fi
+    
+    # 提取所有IP并准备fping测试
+    local ips=()
+    declare -A ip_to_dc
+    
+    while IFS='|' read -r ip dc; do
+        if [[ -n "$ip" ]]; then
+            ips+=("$ip")
+            ip_to_dc["$ip"]="$dc"
+        fi
+    done <<< "$tg_nodes"
+    
+    if [[ ${#ips[@]} -eq 0 ]]; then
+        TELEGRAM_BEST_IP=""
+        TELEGRAM_BEST_DC=""
+        TELEGRAM_BEST_LATENCY="N/A"
+        return
+    fi
+    
+    # 使用fping批量测试
+    local best_ip=""
+    local best_latency=999999
+    local best_dc=""
+    
+    if command -v fping >/dev/null 2>&1; then
+        local fping_output=$(fping -c 3 -t 1000 -q "${ips[@]}" 2>&1)
+        
+        for ip in "${ips[@]}"; do
+            local result=$(echo "$fping_output" | grep "^$ip")
+            if [[ -n "$result" ]]; then
+                local avg=""
+                if echo "$result" | grep -q "min/avg/max"; then
+                    avg=$(echo "$result" | sed -n 's/.*min\/avg\/max = [0-9.]*\/\([0-9.]*\)\/.*/\1/p')
+                else
+                    avg=$(echo "$result" | sed -n 's/.*avg\/max = [0-9.]*\/[0-9.]*\/\([0-9.]*\).*/\1/p')
+                fi
+                
+                if [[ -n "$avg" ]]; then
+                    local avg_int=${avg%.*}
+                    if [[ $avg_int -lt $best_latency ]]; then
+                        best_latency=$avg_int
+                        best_ip="$ip"
+                        best_dc="${ip_to_dc[$ip]}"
+                    fi
+                fi
+            fi
+        done
+    fi
+    
+    # 缓存结果
+    if [[ -n "$best_ip" && $best_latency -lt 999999 ]]; then
+        TELEGRAM_BEST_IP="$best_ip"
+        TELEGRAM_BEST_DC="$best_dc"
+        TELEGRAM_BEST_LATENCY="${best_latency}.0"
+    else
+        TELEGRAM_BEST_IP=""
+        TELEGRAM_BEST_DC=""
+        TELEGRAM_BEST_LATENCY="N/A"
+    fi
+}
+
 # 使用fping显示所有网站的快速延迟测试
 show_fping_results() {
     echo ""
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     echo -e "${CYAN}📡 快速Ping延迟测试 (使用fping批量测试)${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
+    
+    # 先测试Telegram获取最佳IP
+    test_telegram_in_fping
     
     # 收集所有主机
     local hosts=()
@@ -984,6 +1095,27 @@ show_fping_results() {
                 fi
                 ((count++))
             done
+            
+            # 显示Telegram结果（如果已测试）
+            if [[ -n "$TELEGRAM_BEST_IP" ]]; then
+                local tg_latency_color=""
+                local tg_latency_int=${TELEGRAM_BEST_LATENCY%.*}
+                local tg_status=""
+                
+                if [[ "$tg_latency_int" -lt 50 ]]; then
+                    tg_latency_color="${GREEN}"
+                    tg_status="${GREEN}🟢 优秀${NC}"
+                elif [[ "$tg_latency_int" -lt 150 ]]; then
+                    tg_latency_color="${YELLOW}"
+                    tg_status="${YELLOW}🟡 良好${NC}"
+                else
+                    tg_latency_color="${RED}"
+                    tg_status="${RED}⚠️  较差${NC}"
+                fi
+                
+                echo -e "$(printf "%-15s %-20s %-25s" "$count." "Telegram" "Telegram_DC") ${tg_latency_color}${TELEGRAM_BEST_LATENCY}ms${NC} $tg_status"
+                ((count++))
+            fi
         else
             echo "❌ fping测试失败或无结果"
         fi
@@ -1025,7 +1157,7 @@ declare -A FULL_SITES=(
     ["Apple"]="apple.com"
     ["Microsoft"]="m365.cloud.microsoft"
     ["AWS"]="aws.amazon.com"
-    ["Twitter"]="twitter.com"
+    ["X"]="x.com"
     ["ChatGPT"]="openai.com"
     ["Steam"]="steampowered.com"
     ["NodeSeek"]="nodeseek.com"
@@ -1390,135 +1522,40 @@ test_tcp_latency() {
 test_telegram_connectivity() {
     local service=$1
     
-    # 检查是否有Python环境
-    if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
-        echo -e "${RED}需要Python环境 ❌${NC}"
-        RESULTS+=("$service|telegram_dc_test|N/A|需要Python|N/A|N/A|N/A|N/A")
+    # 使用fping阶段缓存的最佳IP进行TCP连接测试
+    if [[ -z "$TELEGRAM_BEST_IP" || "$TELEGRAM_BEST_LATENCY" == "N/A" ]]; then
+        echo -e "${RED}Telegram节点未检测到 ❌${NC}"
+        RESULTS+=("$service|Telegram_DC|超时|失败|N/A|N/A|N/A|N/A")
         return
     fi
     
-    # 使用Python获取所有Telegram DC节点IP
-    local python_cmd="python3"
-    if ! command -v python3 >/dev/null 2>&1; then
-        python_cmd="python"
-    fi
+    # 使用TCP连接测试443端口（Telegram标准端口）
+    echo -n "🔍 ${CYAN}$(printf "%-12s" "$service")${NC} "
     
-    echo -n "🔍 获取Telegram DC节点..."
+    local tcp_latency=$(test_tcp_latency "$TELEGRAM_BEST_IP" 443 3)
     
-    # 获取所有DC节点IP和DC号的映射
-    local tg_nodes=$($python_cmd - <<'PYTHON_EOF'
-import re
-try:
-    import urllib.request
-    url = "https://core.telegram.org/getProxyConfig"
-    data = urllib.request.urlopen(url, timeout=5).read().decode("utf-8")
-    pattern = re.compile(r'proxy_for\s+(-?\d+)\s+([\d.]+):(\d+);')
-    entries = pattern.findall(data)
-    
-    # 输出格式: IP|DC号
-    seen_ips = set()
-    for dc, ip, port in entries:
-        if ip not in seen_ips:
-            dc_id = abs(int(dc))
-            print(f"{ip}|DC{dc_id}")
-            seen_ips.add(ip)
-except Exception as e:
-    pass
-PYTHON_EOF
-)
-    
-    if [[ -z "$tg_nodes" ]]; then
-        echo -e " ${RED}失败 ❌${NC}"
-        RESULTS+=("$service|telegram_dc_test|超时|失败|N/A|N/A|N/A|N/A")
-        return
-    fi
-    
-    echo -e " ${GREEN}完成${NC}"
-    
-    # 提取所有IP地址用于fping测试
-    local ips=()
-    declare -A ip_to_dc
-    
-    while IFS='|' read -r ip dc; do
-        if [[ -n "$ip" ]]; then
-            ips+=("$ip")
-            ip_to_dc["$ip"]="$dc"
-        fi
-    done <<< "$tg_nodes"
-    
-    if [[ ${#ips[@]} -eq 0 ]]; then
-        echo -e "${RED}未获取到Telegram节点 ❌${NC}"
-        RESULTS+=("$service|telegram_dc_test|超时|失败|N/A|N/A|N/A|N/A")
-        return
-    fi
-    
-    echo "🏓 使用fping测试 ${#ips[@]} 个Telegram DC节点..."
-    
-    # 使用fping批量测试所有IP
-    local best_ip=""
-    local best_latency=999999
-    local best_dc=""
-    
-    if command -v fping >/dev/null 2>&1; then
-        local fping_output=$(fping -c 3 -t 1000 -q "${ips[@]}" 2>&1)
-        
-        for ip in "${ips[@]}"; do
-            local result=$(echo "$fping_output" | grep "^$ip")
-            if [[ -n "$result" ]]; then
-                local avg=""
-                if echo "$result" | grep -q "min/avg/max"; then
-                    # macOS格式
-                    avg=$(echo "$result" | sed -n 's/.*min\/avg\/max = [0-9.]*\/\([0-9.]*\)\/.*/\1/p')
-                else
-                    # Linux格式
-                    avg=$(echo "$result" | sed -n 's/.*avg\/max = [0-9.]*\/[0-9.]*\/\([0-9.]*\).*/\1/p')
-                fi
-                
-                if [[ -n "$avg" ]]; then
-                    local avg_int=${avg%.*}
-                    if [[ $avg_int -lt $best_latency ]]; then
-                        best_latency=$avg_int
-                        best_ip="$ip"
-                        best_dc="${ip_to_dc[$ip]}"
-                    fi
-                fi
-            fi
-        done
-    else
-        # 没有fping，使用标准ping测试前5个
-        for ip in "${ips[@]:0:5}"; do
-            local latency=$(test_ip_latency "$ip" 2)
-            if [[ "$latency" != "999999" ]] && [[ "$latency" =~ ^[0-9]+\.?[0-9]*$ ]]; then
-                local latency_int=${latency%.*}
-                if [[ $latency_int -lt $best_latency ]]; then
-                    best_latency=$latency_int
-                    best_ip="$ip"
-                    best_dc="${ip_to_dc[$ip]}"
-                fi
-            fi
-        done
-    fi
-    
-    # 生成结果
-    if [[ -n "$best_ip" && $best_latency -lt 999999 ]]; then
+    if [[ "$tcp_latency" != "999999" ]]; then
         local status_text=""
-        local loss="0%"
+        local tcp_latency_int=${tcp_latency%.*}
         
-        if [[ $best_latency -lt 50 ]]; then
+        if [[ $tcp_latency_int -lt 50 ]]; then
             status_text="优秀"
-        elif [[ $best_latency -lt 150 ]]; then
+            echo -e "${GREEN}IPv4${NC}     ${TELEGRAM_BEST_IP} ${GREEN}${tcp_latency}ms${NC}    ${GREEN}🟢 优秀${NC}"
+        elif [[ $tcp_latency_int -lt 150 ]]; then
             status_text="良好"
-        elif [[ $best_latency -lt 300 ]]; then
+            echo -e "${GREEN}IPv4${NC}     ${TELEGRAM_BEST_IP} ${YELLOW}${tcp_latency}ms${NC}    ${YELLOW}🟡 良好${NC}"
+        elif [[ $tcp_latency_int -lt 300 ]]; then
             status_text="一般"
+            echo -e "${GREEN}IPv4${NC}     ${TELEGRAM_BEST_IP} ${PURPLE}${tcp_latency}ms${NC}    ${PURPLE}⚠️  一般${NC}"
         else
             status_text="较差"
+            echo -e "${GREEN}IPv4${NC}     ${TELEGRAM_BEST_IP} ${RED}${tcp_latency}ms${NC}    ${RED}❌ 较差${NC}"
         fi
         
-        echo -e "✅ 最佳节点: ${GREEN}${best_ip}${NC} ($best_dc) - ${best_latency}ms"
-        RESULTS+=("$service|telegram_dc_test|${best_latency}ms|$status_text|$best_ip|N/A|$loss|$best_dc")
+        RESULTS+=("$service|Telegram_DC|${tcp_latency}ms|$status_text|$TELEGRAM_BEST_IP|N/A|0%|$TELEGRAM_BEST_DC")
     else
-        echo -e "${RED}所有节点测试失败 ❌${NC}"
-        RESULTS+=("$service|telegram_dc_test|超时|失败|N/A|N/A|N/A|N/A")
+        echo -e "${RED}TCP连接失败 ❌${NC}"
+        RESULTS+=("$service|Telegram_DC|超时|失败|$TELEGRAM_BEST_IP|N/A|N/A|$TELEGRAM_BEST_DC")
     fi
 }
 
@@ -2658,8 +2695,8 @@ show_results() {
         local ipv4_display="$ipv4_addr"
         local version_display="${version:-IPv4}"
         
-        if [[ "$host" == "telegram_dc_test" ]]; then
-            host_display="telegram_dc_test"
+        if [[ "$host" == "telegram_dc_test" || "$host" == "Telegram_DC" ]]; then
+            host_display="Telegram_DC"
             version_display="$version"  # DC号显示在版本列
         else
             # 截断过长的IP地址
