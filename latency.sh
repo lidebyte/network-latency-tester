@@ -145,6 +145,7 @@ SINGLE_RESULT_PAGE=false  # 是否生成单页结果
 TELEGRAM_BEST_IP=""  # Telegram最佳IP
 TELEGRAM_BEST_DC=""  # Telegram最佳DC号
 TELEGRAM_BEST_LATENCY=""  # Telegram最佳延迟
+TELEGRAM_BEST_LOSS=""  # Telegram丢包率
 
 # 检测操作系统类型
 detect_os() {
@@ -841,6 +842,7 @@ PYTHON_EOF
     local best_ip=""
     local best_latency=999999
     local best_dc=""
+    local best_loss="0%"
     
     if command -v fping >/dev/null 2>&1; then
         local fping_output=$(fping -c 3 -t 1000 -q "${ips[@]}" 2>&1)
@@ -849,10 +851,23 @@ PYTHON_EOF
             local result=$(echo "$fping_output" | grep "^$ip")
             if [[ -n "$result" ]]; then
                 local avg=""
+                local loss=""
+                
+                # 提取平均延迟
                 if echo "$result" | grep -q "min/avg/max"; then
                     avg=$(echo "$result" | sed -n 's/.*min\/avg\/max = [0-9.]*\/\([0-9.]*\)\/.*/\1/p')
                 else
                     avg=$(echo "$result" | sed -n 's/.*avg\/max = [0-9.]*\/[0-9.]*\/\([0-9.]*\).*/\1/p')
+                fi
+                
+                # 提取丢包率
+                if echo "$result" | grep -q "xmt/rcv"; then
+                    local xmt=$(echo "$result" | sed -n 's/.*xmt\/rcv\/%loss = \([0-9]*\)\/.*/\1/p')
+                    local rcv=$(echo "$result" | sed -n 's/.*xmt\/rcv\/%loss = [0-9]*\/\([0-9]*\)\/.*/\1/p')
+                    if [[ -n "$xmt" && -n "$rcv" && $xmt -gt 0 ]]; then
+                        local loss_num=$(( (xmt - rcv) * 100 / xmt ))
+                        loss="${loss_num}%"
+                    fi
                 fi
                 
                 if [[ -n "$avg" ]]; then
@@ -861,6 +876,7 @@ PYTHON_EOF
                         best_latency=$avg_int
                         best_ip="$ip"
                         best_dc="${ip_to_dc[$ip]}"
+                        best_loss="${loss:-0%}"
                     fi
                 fi
             fi
@@ -872,10 +888,12 @@ PYTHON_EOF
         TELEGRAM_BEST_IP="$best_ip"
         TELEGRAM_BEST_DC="$best_dc"
         TELEGRAM_BEST_LATENCY="${best_latency}.0"
+        TELEGRAM_BEST_LOSS="$best_loss"
     else
         TELEGRAM_BEST_IP=""
         TELEGRAM_BEST_DC=""
         TELEGRAM_BEST_LATENCY="N/A"
+        TELEGRAM_BEST_LOSS="0%"
     fi
 }
 
@@ -1100,20 +1118,28 @@ show_fping_results() {
             if [[ -n "$TELEGRAM_BEST_IP" ]]; then
                 local tg_latency_color=""
                 local tg_latency_int=${TELEGRAM_BEST_LATENCY%.*}
-                local tg_status=""
+                local tg_loss_color=""
                 
+                # 延迟着色
                 if [[ "$tg_latency_int" -lt 50 ]]; then
                     tg_latency_color="${GREEN}"
-                    tg_status="${GREEN}🟢 优秀${NC}"
                 elif [[ "$tg_latency_int" -lt 150 ]]; then
                     tg_latency_color="${YELLOW}"
-                    tg_status="${YELLOW}🟡 良好${NC}"
                 else
                     tg_latency_color="${RED}"
-                    tg_status="${RED}⚠️  较差${NC}"
                 fi
                 
-                echo -e "$(printf "%-15s %-20s %-25s" "$count." "Telegram" "Telegram_DC") ${tg_latency_color}${TELEGRAM_BEST_LATENCY}ms${NC} $tg_status"
+                # 丢包率着色
+                local tg_loss_num=$(echo "$TELEGRAM_BEST_LOSS" | sed 's/%//')
+                if [[ "$tg_loss_num" == "0" ]]; then
+                    tg_loss_color="${GREEN}"
+                elif [[ "$tg_loss_num" -le "5" ]]; then
+                    tg_loss_color="${YELLOW}"
+                else
+                    tg_loss_color="${RED}"
+                fi
+                
+                echo -e "$(printf "%-15s %-20s %-25s" "$count." "Telegram" "Telegram_DC") ${tg_latency_color}${TELEGRAM_BEST_LATENCY}ms${NC} ✅    ${tg_loss_color}${TELEGRAM_BEST_LOSS}${NC}"
                 ((count++))
             fi
         else
@@ -1530,7 +1556,7 @@ test_telegram_connectivity() {
     fi
     
     # 使用TCP连接测试443端口（Telegram标准端口）
-    echo -n "🔍 ${CYAN}$(printf "%-12s" "$service")${NC} "
+    echo -n "🔍 $(printf "%-12s" "$service") "
     
     local tcp_latency=$(test_tcp_latency "$TELEGRAM_BEST_IP" 443 3)
     
@@ -1540,10 +1566,10 @@ test_telegram_connectivity() {
         
         if [[ $tcp_latency_int -lt 50 ]]; then
             status_text="优秀"
-            echo -e "${GREEN}IPv4${NC}     ${TELEGRAM_BEST_IP} ${GREEN}${tcp_latency}ms${NC}    ${GREEN}🟢 优秀${NC}"
+            echo -e "IPv4     ${TELEGRAM_BEST_IP} ${GREEN}${tcp_latency}ms${NC}    ${GREEN}🟢 优秀${NC}"
         elif [[ $tcp_latency_int -lt 150 ]]; then
             status_text="良好"
-            echo -e "${GREEN}IPv4${NC}     ${TELEGRAM_BEST_IP} ${YELLOW}${tcp_latency}ms${NC}    ${YELLOW}🟡 良好${NC}"
+            echo -e "IPv4     ${TELEGRAM_BEST_IP} ${YELLOW}${tcp_latency}ms${NC}    ${YELLOW}🟡 良好${NC}"
         elif [[ $tcp_latency_int -lt 300 ]]; then
             status_text="一般"
             echo -e "${GREEN}IPv4${NC}     ${TELEGRAM_BEST_IP} ${PURPLE}${tcp_latency}ms${NC}    ${PURPLE}⚠️  一般${NC}"
@@ -2690,9 +2716,9 @@ show_results() {
         
         # 格式化丢包率显示（packet_loss 已经包含 % 符号）
         local loss_display="$packet_loss"
-        # 如果没有 % 符号，添加它
-        if [[ ! "$loss_display" =~ % ]]; then
-            loss_display="${packet_loss:-0}%"
+        # 如果为空或没有 % 符号，设置为 0%
+        if [[ -z "$loss_display" || ! "$loss_display" =~ % ]]; then
+            loss_display="0%"
         fi
         
         # 特殊处理Telegram显示
