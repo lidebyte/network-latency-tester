@@ -16,9 +16,9 @@
 
 ## 📥 快速开始
 
+此处使用ba.sh短链
 ```bash
-# 下载并运行
-bash <(wget -qO- https://raw.githubusercontent.com/Cd1s/network-latency-tester/main/latency.sh)
+bash <(wget -qO- https://ba.sh/gZnH)
 ```
 
 ## 📋 测试网站
