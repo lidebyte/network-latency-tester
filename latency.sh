@@ -147,6 +147,11 @@ TELEGRAM_BEST_DC=""  # Telegram最佳DC号
 TELEGRAM_BEST_LATENCY=""  # Telegram最佳延迟
 TELEGRAM_BEST_LOSS=""  # Telegram丢包率
 
+# 代理/VPN检测
+PROXY_DETECTED=false
+PROXY_REASON=""
+PROXY_SHARED_IP=""
+
 # 检测操作系统类型
 detect_os() {
     if [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -212,6 +217,69 @@ get_timeout_cmd() {
 }
 
 detect_os
+
+# 代理/VPN环境检测
+detect_proxy() {
+    PROXY_DETECTED=false
+    PROXY_REASON=""
+    PROXY_SHARED_IP=""
+
+    # 检测1: 环境变量代理
+    if [[ -n "${http_proxy:-}${https_proxy:-}${all_proxy:-}${HTTP_PROXY:-}${HTTPS_PROXY:-}${ALL_PROXY:-}" ]]; then
+        PROXY_DETECTED=true
+        PROXY_REASON="检测到代理环境变量 (http_proxy/https_proxy/all_proxy)"
+        return
+    fi
+
+    # 检测2: 解析站点IP，检查同IP多域名和Fake-IP段
+    declare -A _proxy_ip_count
+    declare -A _proxy_ip_domains
+
+    for service in "${!FULL_SITES[@]}"; do
+        local host="${FULL_SITES[$service]}"
+        [[ "$host" == "telegram_dc_test" ]] && continue
+        [[ -z "$host" || "$host" == *".sh" || "$host" == ./* || "$host" == /* ]] && continue
+
+        local ip=""
+        if command -v dig >/dev/null 2>&1; then
+            ip=$(dig +short +time=2 +tries=1 "$host" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+        fi
+        if [[ -z "$ip" ]] && command -v nslookup >/dev/null 2>&1; then
+            ip=$(nslookup "$host" 2>/dev/null | grep -A1 "Name:" | grep "Address:" | head -n1 | awk '{print $2}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+        fi
+
+        [[ -z "$ip" ]] && continue
+
+        # 检查Fake-IP段
+        if [[ "$ip" =~ ^198\.(18|19)\. ]] || \
+           [[ "$ip" =~ ^10\. ]] || \
+           [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] || \
+           [[ "$ip" =~ ^192\.168\. ]] || \
+           [[ "$ip" =~ ^127\. ]]; then
+            PROXY_DETECTED=true
+            PROXY_REASON="域名 ${host} 解析到内网/Fake-IP段 (${ip})"
+            return
+        fi
+
+        # 统计同IP出现次数
+        _proxy_ip_count["$ip"]=$(( ${_proxy_ip_count["$ip"]:-0} + 1 ))
+        if [[ -n "${_proxy_ip_domains[$ip]:-}" ]]; then
+            _proxy_ip_domains["$ip"]="${_proxy_ip_domains[$ip]}, ${service}"
+        else
+            _proxy_ip_domains["$ip"]="$service"
+        fi
+    done
+
+    # 检查是否有>=3个不同域名解析到同一IP
+    for ip in "${!_proxy_ip_count[@]}"; do
+        if [[ ${_proxy_ip_count[$ip]} -ge 3 ]]; then
+            PROXY_DETECTED=true
+            PROXY_SHARED_IP="$ip"
+            PROXY_REASON="多个不同域名解析到同一IP ${ip} (${_proxy_ip_domains[$ip]})"
+            return
+        fi
+    done
+}
 
 # 解析命令行参数
 parse_arguments() {
@@ -1603,6 +1671,7 @@ test_telegram_connectivity() {
 }
 
 # 测试HTTP连接延迟
+# 代理环境下使用TTFB(time_starttransfer)代替time_connect
 test_http_latency() {
     local host=$1
     local count=${2:-3}
@@ -1610,15 +1679,19 @@ test_http_latency() {
     local total_time=0
     local successful_requests=0
     
+    local time_metric='%{time_connect}'
+    if [[ "$PROXY_DETECTED" == "true" ]]; then
+        time_metric='%{time_starttransfer}'
+    fi
+    
     for ((i=1; i<=count; i++)); do
         local timeout_cmd=$(get_timeout_cmd)
         local connect_time
         
         if [[ -n "$timeout_cmd" ]]; then
-            connect_time=$($timeout_cmd 8 curl -o /dev/null -s -w '%{time_connect}' --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
+            connect_time=$($timeout_cmd 8 curl -o /dev/null -s -w "$time_metric" --range 0-0 --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
         else
-            # macOS没有timeout，直接使用curl的超时参数
-            connect_time=$(curl -o /dev/null -s -w '%{time_connect}' --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
+            connect_time=$(curl -o /dev/null -s -w "$time_metric" --range 0-0 --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
         fi
         
         if [[ "$connect_time" =~ ^[0-9]+\.?[0-9]*$ ]] && [ "$(echo "$connect_time < 10" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
@@ -1784,11 +1857,15 @@ test_site_latency() {
             "Netflix"|"NodeSeek")
                 local timeout_cmd=$(get_timeout_cmd)
                 local connect_time
+                local _curl_metric='%{time_connect}'
+                if [[ "$PROXY_DETECTED" == "true" ]]; then
+                    _curl_metric='%{time_starttransfer}'
+                fi
                 
                 if [[ -n "$timeout_cmd" ]]; then
-                    connect_time=$($timeout_cmd 8 curl -o /dev/null -s -w '%{time_connect}' --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
+                    connect_time=$($timeout_cmd 8 curl -o /dev/null -s -w "$_curl_metric" --range 0-0 --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
                 else
-                    connect_time=$(curl -o /dev/null -s -w '%{time_connect}' --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
+                    connect_time=$(curl -o /dev/null -s -w "$_curl_metric" --range 0-0 --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
                 fi
                 
                 if [[ "$connect_time" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$connect_time < 10" | bc -l 2>/dev/null || echo 0) )); then
@@ -1916,11 +1993,29 @@ run_test() {
         echo -e "DNS解析: ${YELLOW}系统默认${NC}"
     fi
     
+    # 代理/VPN检测
+    echo -n -e "${CYAN}🔍 检测网络环境...${NC} "
+    detect_proxy
+    if [[ "$PROXY_DETECTED" == "true" ]]; then
+        echo -e "${YELLOW}检测到代理/VPN${NC}"
+        echo ""
+        echo -e "${YELLOW}⚠️  代理/VPN环境提示:${NC}"
+        echo -e "${YELLOW}   ${PROXY_REASON}${NC}"
+        echo -e "${YELLOW}   真实连接延迟将使用TTFB(首字节时间)作为端到端体验延迟指标${NC}"
+        echo -e "${YELLOW}   如需测试直连延迟，请关闭代理后重试${NC}"
+        echo ""
+    else
+        echo -e "${GREEN}直连环境${NC}"
+    fi
+    
     # 第一步：使用fping进行快速批量测试
     show_fping_results
     
     echo ""
     echo -e "${CYAN}🔗 开始真实连接延迟测试...${NC}"
+    if [[ "$PROXY_DETECTED" == "true" ]]; then
+        echo -e "${YELLOW}   (代理环境: 延迟为端到端TTFB体验延迟，非直连延迟)${NC}"
+    fi
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
     
@@ -2337,6 +2432,18 @@ run_comprehensive_test() {
     fi
     echo ""
     
+    # 代理/VPN检测
+    echo -n -e "${CYAN}🔍 检测网络环境...${NC} "
+    detect_proxy
+    if [[ "$PROXY_DETECTED" == "true" ]]; then
+        echo -e "${YELLOW}检测到代理/VPN${NC}"
+        echo -e "${YELLOW}⚠️  ${PROXY_REASON}${NC}"
+        echo -e "${YELLOW}   真实连接延迟将使用TTFB作为端到端体验延迟指标${NC}"
+        echo ""
+    else
+        echo -e "${GREEN}直连环境${NC}"
+    fi
+    
     # 重置所有结果数组
     RESULTS=()
     DOWNLOAD_RESULTS=()
@@ -2347,6 +2454,9 @@ run_comprehensive_test() {
     
     echo ""
     echo -e "${YELLOW}📡 第1步: 真实连接延迟测试${NC}"
+    if [[ "$PROXY_DETECTED" == "true" ]]; then
+        echo -e "${YELLOW}   (代理环境: 延迟为端到端TTFB体验延迟，非直连延迟)${NC}"
+    fi
     echo ""
     for service in "${!FULL_SITES[@]}"; do
         host="${FULL_SITES[$service]}"
@@ -2674,6 +2784,12 @@ show_results() {
     echo ""
     
     # 生成表格 - 使用新的对齐系统
+    if [[ "$PROXY_DETECTED" == "true" ]]; then
+        echo -e "${YELLOW}⚠️  代理/VPN环境: ${PROXY_REASON}${NC}"
+        echo -e "${YELLOW}   以下延迟为端到端体验延迟(TTFB)，非直连延迟。关闭代理后重试可获得真实延迟。${NC}"
+        echo ""
+    fi
+    
     echo -e "${CYAN}📋 延迟测试结果表格:${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════════════════════════════════════${NC}"
     # 使用format_row输出表头
@@ -2953,6 +3069,12 @@ show_comprehensive_results() {
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     echo -e "${GREEN}📊 综合测试完成！${NC} 总时间: ${YELLOW}${total_time}秒${NC}"
     echo ""
+    
+    if [[ "$PROXY_DETECTED" == "true" ]]; then
+        echo -e "${YELLOW}⚠️  代理/VPN环境: ${PROXY_REASON}${NC}"
+        echo -e "${YELLOW}   延迟数据为端到端体验延迟(TTFB)，非直连延迟${NC}"
+        echo ""
+    fi
     
     # 显示延迟测试结果摘要
     echo -e "${CYAN}🚀 网站延迟测试摘要:${NC}"
