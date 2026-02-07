@@ -232,30 +232,36 @@ detect_proxy() {
     fi
 
     # 检测2: 解析站点IP，检查同IP多域名和Fake-IP段
-    declare -A _proxy_ip_count
-    declare -A _proxy_ip_domains
+    local -A _proxy_ip_count
+    local -A _proxy_ip_domains
 
     for service in "${!FULL_SITES[@]}"; do
         local host="${FULL_SITES[$service]}"
         [[ "$host" == "telegram_dc_test" ]] && continue
         [[ -z "$host" || "$host" == *".sh" || "$host" == ./* || "$host" == /* ]] && continue
+        [[ "$host" == -* || "$host" =~ [[:space:]] ]] && continue
 
         local ip=""
         if command -v dig >/dev/null 2>&1; then
-            ip=$(dig +short +time=2 +tries=1 "$host" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
+            ip=$(dig +short +time=2 +tries=1 -- "$host" 2>/dev/null | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$' | head -n1)
         fi
         if [[ -z "$ip" ]] && command -v nslookup >/dev/null 2>&1; then
-            ip=$(nslookup "$host" 2>/dev/null | grep -A1 "Name:" | grep "Address:" | head -n1 | awk '{print $2}' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$')
+            ip=$(nslookup "$host" 2>/dev/null | grep "Address:" | tail -n +2 | head -n1 | awk '{print $2}' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+')
         fi
 
         [[ -z "$ip" ]] && continue
 
-        # 检查Fake-IP段
+        # 检查Fake-IP段和非公网保留段
         if [[ "$ip" =~ ^198\.(18|19)\. ]] || \
            [[ "$ip" =~ ^10\. ]] || \
            [[ "$ip" =~ ^172\.(1[6-9]|2[0-9]|3[01])\. ]] || \
            [[ "$ip" =~ ^192\.168\. ]] || \
-           [[ "$ip" =~ ^127\. ]]; then
+           [[ "$ip" =~ ^127\. ]] || \
+           [[ "$ip" =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\. ]] || \
+           [[ "$ip" =~ ^169\.254\. ]] || \
+           [[ "$ip" =~ ^0\. ]] || \
+           [[ "$ip" =~ ^(192\.0\.0\.|192\.0\.2\.|198\.51\.100\.|203\.0\.113\.) ]] || \
+           [[ "$ip" =~ ^(22[4-9]|23[0-9]|24[0-9]|25[0-5])\. ]]; then
             PROXY_DETECTED=true
             PROXY_REASON="域名 ${host} 解析到内网/Fake-IP段 (${ip})"
             return
@@ -1596,6 +1602,12 @@ test_tcp_latency() {
     local port=$2
     local count=${3:-3}
     
+    # 输入验证：防止命令注入
+    if [[ "$host" =~ [^a-zA-Z0-9._:-] ]] || [[ "$port" =~ [^0-9] ]]; then
+        echo "999999"
+        return
+    fi
+    
     local total_time=0
     local successful_connects=0
     
@@ -1604,15 +1616,14 @@ test_tcp_latency() {
         local timeout_cmd=$(get_timeout_cmd)
         
         if [[ -n "$timeout_cmd" ]]; then
-            if $timeout_cmd 5 bash -c "exec 3<>/dev/tcp/$host/$port && exec 3<&- && exec 3>&-" 2>/dev/null; then
+            if $timeout_cmd 5 bash -c 'exec 3<>/dev/tcp/$1/$2 && exec 3<&- && exec 3>&-' _ "$host" "$port" 2>/dev/null; then
                 local end_time=$(date +%s%N)
                 local connect_time=$(( (end_time - start_time) / 1000000 ))
                 total_time=$((total_time + connect_time))
                 ((successful_connects++))
             fi
         else
-            # macOS没有timeout，直接尝试连接（可能会等待更长时间）
-            if bash -c "exec 3<>/dev/tcp/$host/$port && exec 3<&- && exec 3>&-" 2>/dev/null; then
+            if bash -c 'exec 3<>/dev/tcp/$1/$2 && exec 3<&- && exec 3>&-' _ "$host" "$port" 2>/dev/null; then
                 local end_time=$(date +%s%N)
                 local connect_time=$(( (end_time - start_time) / 1000000 ))
                 total_time=$((total_time + connect_time))
@@ -1689,9 +1700,9 @@ test_http_latency() {
         local connect_time
         
         if [[ -n "$timeout_cmd" ]]; then
-            connect_time=$($timeout_cmd 8 curl -o /dev/null -s -w "$time_metric" --range 0-0 --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
+            connect_time=$($timeout_cmd 8 curl -o /dev/null -s -w "$time_metric" --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
         else
-            connect_time=$(curl -o /dev/null -s -w "$time_metric" --range 0-0 --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
+            connect_time=$(curl -o /dev/null -s -w "$time_metric" --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
         fi
         
         if [[ "$connect_time" =~ ^[0-9]+\.?[0-9]*$ ]] && [ "$(echo "$connect_time < 10" | bc -l 2>/dev/null || echo 0)" = "1" ]; then
@@ -1863,9 +1874,9 @@ test_site_latency() {
                 fi
                 
                 if [[ -n "$timeout_cmd" ]]; then
-                    connect_time=$($timeout_cmd 8 curl -o /dev/null -s -w "$_curl_metric" --range 0-0 --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
+                    connect_time=$($timeout_cmd 8 curl -o /dev/null -s -w "$_curl_metric" --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
                 else
-                    connect_time=$(curl -o /dev/null -s -w "$_curl_metric" --range 0-0 --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
+                    connect_time=$(curl -o /dev/null -s -w "$_curl_metric" --max-time 6 --connect-timeout 4 "https://$host" 2>/dev/null || echo "999")
                 fi
                 
                 if [[ "$connect_time" =~ ^[0-9]+\.?[0-9]*$ ]] && (( $(echo "$connect_time < 10" | bc -l 2>/dev/null || echo 0) )); then
