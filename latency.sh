@@ -113,13 +113,35 @@ format_row() {
         local actual_width=$(display_width "$clean_content")
         local padding=$((width - actual_width))
         
-        # 如果内容过长，截断
+        # 如果内容过长，按显示宽度截断（中文不截中间）
         if [[ $padding -lt 0 ]]; then
-            local truncate_len=$((${#clean_content} + padding - 3))
-            if [[ $truncate_len -gt 0 ]]; then
-                clean_content="${clean_content:0:$truncate_len}..."
-                content="$clean_content"
-            fi
+            python3 -c "
+s = '''$clean_content'''
+w = $width
+result = ''
+cur = 0
+for c in s:
+    cw = 2 if ord(c) > 127 else 1
+    if cur + cw > w - 3:
+        break
+    result += c
+    cur += cw
+print(result + '...')
+" > /dev/null
+            clean_content=$(python3 -c "
+s = '''$clean_content'''
+w = $width
+result = ''
+cur = 0
+for c in s:
+    cw = 2 if ord(c) > 127 else 1
+    if cur + cw > w - 3:
+        break
+    result += c
+    cur += cw
+print(result + '...')
+")
+            content="$clean_content"
             padding=0
         fi
         
@@ -1110,7 +1132,7 @@ show_fping_results() {
     if command -v fping >/dev/null 2>&1; then
         if [[ -s "$temp_results" ]]; then
             echo ""
-            printf "%-15s %-20s %-25s %-10s %-10s\n" "排名" "网站" "域名" "延迟" "丢包率"
+            format_row "排名:4:right" "网站:14:left" "域名:20:left" "延迟:10:right" "丢包率:10:right"
             echo "───────────────────────────────────────────────────────────────────────────"
             
             local count=1
@@ -2864,7 +2886,7 @@ show_dns_results() {
     # 生成DNS结果表格
     echo -e "${CYAN}📋 DNS解析速度结果:${NC}"
     echo -e "${BLUE}───────────────────────────────────────────────────────────────────────────${NC}"
-    printf "%-15s %-20s %-25s %-10s %-10s\n" "排名" "DNS服务器" "IP地址" "解析时间" "状态"
+    format_row "排名:4:right" "DNS服务器:14:left" "IP地址:20:left" "解析时间:10:right" "状态:10:left"
     echo -e "${BLUE}───────────────────────────────────────────────────────────────────────────${NC}"
     
     # 排序DNS结果
@@ -2894,18 +2916,18 @@ show_dns_results() {
         
         local status_colored=""
         if [[ "$status" == *"成功"* ]]; then
-            status_colored="${GREEN}✅ $status${NC}"
+            status_colored="${GREEN}✅  $status${NC}"
         else
             status_colored="${RED}❌ $status${NC}"
         fi
-        echo -e "$(printf "%-15s %-20s %-25s %-10s %-10s" "${rank}." "$dns_name" "$dns_server" "$resolution_time" "$status_colored")"
+        format_row "${rank}.:4:right" "${dns_name}:14:left" "${dns_server}:20:left" "${resolution_time}:10:right" "${status_colored}:10:left"
         ((rank++))
     done
     
     # 显示失败的DNS结果
     for result in "${failed_dns_results[@]}"; do
         IFS='|' read -r dns_name dns_server resolution_time status <<< "$result"
-        echo -e "$(printf "%-15s %-20s %-25s %-10s %-10s" "${rank}." "$dns_name" "$dns_server" "$resolution_time" "${RED}❌ $status${NC}")"
+        format_row "${rank}.:4:right" "${dns_name}:14:left" "${dns_server}:20:left" "${resolution_time}:10:right" "${RED}❌ $status${NC}:10:left"
         ((rank++))
     done
     
