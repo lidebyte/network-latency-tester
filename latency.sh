@@ -419,11 +419,6 @@ generate_text_output() {
             printf '%s\n' "${DNS_RESULTS[@]}"
             echo ""
         fi
-        if [[ ${#DOWNLOAD_RESULTS[@]} -gt 0 ]]; then
-            echo "## 下载速度测试结果"
-            echo "测试点|URL|速度|状态"
-            printf '%s\n' "${DOWNLOAD_RESULTS[@]}"
-        fi
     } > "$file"
 }
 
@@ -506,18 +501,6 @@ generate_markdown_output() {
                 echo ""
             fi
             
-            if [[ ${#DOWNLOAD_RESULTS[@]} -gt 0 ]]; then
-                echo "## 📥 下载速度测试"
-                echo ""
-                echo "| 测试点 | 🚀 速度 | 📍 状态 |"
-                echo "|--------|:------:|:------:|"
-                for result in "${DOWNLOAD_RESULTS[@]}"; do
-                    IFS='|' read -r name url speed status <<< "$result"
-                    echo "| **$name** | $speed | $status |"
-                done
-                echo ""
-            fi
-            
             echo "---"
             echo ""
             echo "## 💡 延迟等级说明"
@@ -563,17 +546,6 @@ generate_markdown_output() {
                     ((rank++))
                 done
                 echo ""
-            fi
-            
-            if [[ ${#DOWNLOAD_RESULTS[@]} -gt 0 ]]; then
-                echo "## 📥 下载速度测试结果"
-                echo ""
-                echo "| 测试点 | 速度 | 状态 |"
-                echo "|--------|------|------|"
-                for result in "${DOWNLOAD_RESULTS[@]}"; do
-                    IFS='|' read -r name url speed status <<< "$result"
-                    echo "| $name | $speed | $status |"
-                done
             fi
         } > "$file"
     fi
@@ -698,17 +670,6 @@ HTML_HEADER
                     [[ $rank -eq 3 ]] && rank_display="🥉"
                     echo "<tr><td class=\"rank\">$rank_display</td><td><strong>$dns_name</strong></td><td><code>$server</code></td><td>$time</td><td>$status</td></tr>"
                     ((rank++))
-                done
-                echo "</tbody></table>"
-            fi
-            
-            # 下载速度测试
-            if [[ ${#DOWNLOAD_RESULTS[@]} -gt 0 ]]; then
-                echo "<h2>📥 下载速度测试</h2>"
-                echo "<table><thead><tr><th>测试点</th><th>🚀 速度</th><th>📍 状态</th></tr></thead><tbody>"
-                for result in "${DOWNLOAD_RESULTS[@]}"; do
-                    IFS='|' read -r name url speed status <<< "$result"
-                    echo "<tr><td><strong>$name</strong></td><td>$speed</td><td>$status</td></tr>"
                 done
                 echo "</tbody></table>"
             fi
@@ -1336,17 +1297,9 @@ declare -A DNS_SERVERS=(
     ["Verisign备用"]="64.6.65.6"
 )
 
-# 测试文件URL列表（用于下载速度测试）
-declare -A DOWNLOAD_TEST_URLS=(
-    ["Cloudflare"]="https://speed.cloudflare.com/__down?bytes=10485760"
-    ["GitHub"]="https://github.com/git/git/archive/refs/heads/master.zip"
-    ["jsdelivr"]="https://cdn.jsdelivr.net/npm/jquery@3.6.0/dist/jquery.min.js"
-)
-
 # 结果数组
 declare -a RESULTS=()
 declare -a DNS_RESULTS=()
-declare -a DOWNLOAD_RESULTS=()
 
 # 获取域名的IP地址
 get_ip_address() {
@@ -1451,99 +1404,6 @@ test_dns_resolution() {
         DNS_RESULTS+=("${dns_name}|${dns_server}|999|失败")
     fi
     echo ""
-}
-
-# 测试下载速度 - 5秒采样重写版本
-test_download_speed() {
-    local name=$1
-    local url=$2
-    local duration=${3:-5}  # 默认5秒测试
-    
-    echo -n -e "📥 测试 ${CYAN}${name}${NC} 下载速度 (${duration}秒采样)... "
-    
-    # 创建临时文件
-    local temp_output
-    local temp_progress
-    temp_output=$(register_temp)
-    temp_progress=$(register_temp)
-    
-    # 使用curl进行流式下载，记录每秒速度
-    local timeout_cmd=$(get_timeout_cmd)
-    
-    # 启动后台下载进程
-    if [[ -n "$timeout_cmd" ]]; then
-        $timeout_cmd $((duration + 2)) curl -o "$temp_output" -# "$url" --max-time $duration --connect-timeout 4 2>&1 | \
-        while IFS= read -r line; do
-            echo "$line" >> "$temp_progress"
-        done &
-    else
-        curl -o "$temp_output" -# "$url" --max-time $duration --connect-timeout 4 2>&1 | \
-        while IFS= read -r line; do
-            echo "$line" >> "$temp_progress"
-        done &
-    fi
-    
-    local curl_pid=$!
-    
-    # 采样过程
-    local samples=0
-    local total_bytes=0
-    local max_speed=0
-    local prev_size=0
-    
-    for ((i=0; i<duration; i++)); do
-        sleep 1
-        if [[ -f "$temp_output" ]]; then
-            local current_size=$(stat -f%z "$temp_output" 2>/dev/null || stat -c%s "$temp_output" 2>/dev/null || echo "0")
-            local bytes_this_sec=$((current_size - prev_size))
-            
-            if [[ $bytes_this_sec -gt 0 ]]; then
-                total_bytes=$((total_bytes + bytes_this_sec))
-                ((samples++))
-                
-                # 计算瞬时速度
-                local instant_speed_mbps
-                instant_speed_mbps=$(awk "BEGIN {printf \"%.2f\", $bytes_this_sec / 1048576}" 2>/dev/null)
-                [[ -z "$instant_speed_mbps" ]] && instant_speed_mbps="0.00"
-
-                # 更新最大速度
-                local cmp
-                cmp=$(awk "BEGIN {print ($instant_speed_mbps > $max_speed) ? 1 : 0}" 2>/dev/null)
-                [[ "$cmp" == "1" ]] && max_speed=$instant_speed_mbps
-            fi
-            
-            prev_size=$current_size
-        fi
-    done
-    
-    # 等待curl完成
-    wait $curl_pid 2>/dev/null
-    
-    # 计算平均速度
-    if [[ $samples -gt 0 ]] && [[ $total_bytes -gt 0 ]]; then
-        local avg_speed_mbps
-        avg_speed_mbps=$(awk "BEGIN {printf \"%.2f\", $total_bytes / $samples / 1048576}" 2>/dev/null)
-        [[ -z "$avg_speed_mbps" ]] && avg_speed_mbps="0.00"
-
-        local cmp_gt
-        cmp_gt=$(awk "BEGIN {print ($avg_speed_mbps > 0.1) ? 1 : 0}" 2>/dev/null)
-        
-        if [[ "$cmp_gt" == "1" ]]; then
-            echo -e "${GREEN}平均 ${avg_speed_mbps} MB/s, 峰值 ${max_speed} MB/s ⚡${NC}"
-            DOWNLOAD_RESULTS+=("${name}|${url}|平均${avg_speed_mbps}MB/s 峰值${max_speed}MB/s|成功")
-        else
-            local avg_speed_kbps
-            avg_speed_kbps=$(awk "BEGIN {printf \"%.0f\", $total_bytes / $samples / 1024}" 2>/dev/null)
-            echo -e "${YELLOW}平均 ${avg_speed_kbps} KB/s 🐌${NC}"
-            DOWNLOAD_RESULTS+=("${name}|${url}|${avg_speed_kbps} KB/s|慢速")
-        fi
-    else
-        echo -e "${RED}失败 (采样不足) ❌${NC}"
-        DOWNLOAD_RESULTS+=("${name}|${url}|失败|失败")
-    fi
-    
-    # 清理临时文件
-    rm -f "$temp_output" "$temp_progress" 2>/dev/null
 }
 
 # 测试丢包率
@@ -2411,7 +2271,7 @@ run_comprehensive_test() {
     command clear 2>/dev/null || true
     show_welcome
     
-    echo -e "${CYAN}📊 开始综合测试 (Ping/真连接+下载速度)${NC}"
+    echo -e "${CYAN}📊 开始综合测试 (Ping/真连接)${NC}"
     echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
     echo ""
     
@@ -2437,7 +2297,6 @@ run_comprehensive_test() {
     
     # 重置所有结果数组
     RESULTS=()
-    DOWNLOAD_RESULTS=()
     local start_time=$(date +%s 2>/dev/null || echo 0)
     
     # 第一步：使用fping进行快速批量测试
@@ -2627,9 +2486,9 @@ run_comprehensive_test() {
     # 显示分析结果
     echo ""
     echo -e "${CYAN}📊 DNS综合分析结果 (100分制)${NC}"
-    echo "──────────────────────────────────────────────────────────────────────────────"
-    printf "%-6s %-18s %-18s %-6s %-6s %-4s\n" "排名" "DNS服务器" "IP地址" "总分" "成功" "评级"
-    echo "──────────────────────────────────────────────────────────────────────────────"
+    echo "───────────────────────────────────────────────────────────────────────────"
+    format_row "排名:4:right" "DNS服务器:14:left" "IP地址:20:left" "总分:8:right" "成功:8:right" "评级:6:left"
+    echo "───────────────────────────────────────────────────────────────────────────"
     
     # 排序并显示结果
     IFS=$'\n' sorted_analysis=($(printf '%s\n' "${analysis_results[@]}" | sort -t'|' -k1 -nr))
@@ -2653,17 +2512,8 @@ run_comprehensive_test() {
             rating="失败"
         fi
         
-        printf "%-6s %-18.18s %-18.18s %-6s %-6s %-4s\n" "${rank}." "$dns_name" "$server" "${score}分" "${success}/3" "$rating"
+        format_row "${rank}.:4:right" "${dns_name}:14:left" "${server}:20:left" "${score}分:8:right" "${success}/3:8:right" "${rating}:6:left"
         ((rank++))
-    done
-    
-    echo ""
-    echo -e "${YELLOW}📥 第4步: 下载速度测试${NC}"
-    echo ""
-    # 执行下载测试
-    for test_name in "${!DOWNLOAD_TEST_URLS[@]}"; do
-        test_url="${DOWNLOAD_TEST_URLS[$test_name]}"
-        test_download_speed "$test_name" "$test_url"
     done
     
     local end_time=$(date +%s 2>/dev/null || echo 0)
@@ -3012,21 +2862,6 @@ show_comprehensive_results() {
         fi
     fi
     
-    # 显示下载速度测试摘要
-    echo ""
-    echo -e "${CYAN}📥 下载速度测试摘要:${NC}"
-    echo -e "${BLUE}─────────────────────────────────────────────────────────────${NC}"
-    if [ ${#DOWNLOAD_RESULTS[@]} -gt 0 ]; then
-        for result in "${DOWNLOAD_RESULTS[@]}"; do
-            IFS='|' read -r test_name test_url speed status <<< "$result"
-            case "$status" in
-                "成功") echo -e "✅ ${test_name}: ${GREEN}${speed}${NC}" ;;
-                "慢速") echo -e "🐌 ${test_name}: ${YELLOW}${speed}${NC}" ;;
-                "失败") echo -e "❌ ${test_name}: ${RED}测试失败${NC}" ;;
-            esac
-        done
-    fi
-    
     # 保存综合结果
     local comprehensive_output_file="comprehensive_results_$(date +%Y%m%d_%H%M%S).txt"
     {
@@ -3039,10 +2874,6 @@ show_comprehensive_results() {
         echo "## DNS解析速度测试结果"
         echo "# DNS服务商|DNS服务器|解析时间|状态"
         printf '%s\n' "${DNS_RESULTS[@]}"
-        echo ""
-        echo "## 下载速度测试结果"
-        echo "# 测试点|URL|速度|状态"
-        printf '%s\n' "${DOWNLOAD_RESULTS[@]}"
     } > "$comprehensive_output_file"
     
     echo ""
@@ -3051,7 +2882,6 @@ show_comprehensive_results() {
     echo -e "${CYAN}💡 网络优化建议:${NC}"
     echo -e "  1. 延迟优化: 选择延迟最低的服务器"
     echo -e "  2. DNS优化: 使用解析最快的DNS服务器"
-    echo -e "  3. 下载优化: 选择下载速度最快的CDN节点"
     
     echo ""
     if [[ -t 0 ]]; then
