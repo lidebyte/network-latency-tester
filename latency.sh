@@ -78,7 +78,7 @@ get_timestamp_ms() {
 display_width() {
     local str="$1"
     if command -v python3 >/dev/null 2>&1; then
-        python3 -c "import sys; s='$str'; print(sum(2 if ord(c) > 127 else 1 for c in s))"
+        STR="$str" python3 -c 'import os; s=os.environ["STR"]; print(sum(2 if ord(c) > 127 else 1 for c in s))'
     else
         # 简单估算：中文字符数*2 + 其他字符数
         local len=${#str}
@@ -109,16 +109,19 @@ format_row() {
         fi
         
         # 去除ANSI颜色代码计算实际长度
-        local clean_content=$(echo -e "$content" | sed 's/\x1b\[[0-9;]*m//g')
-        local actual_width=$(display_width "$clean_content")
+        local clean_content
+        local actual_width
+        clean_content=$(echo -e "$content" | sed 's/\x1b\[[0-9;]*m//g')
+        actual_width=$(display_width "$clean_content")
         local padding=$((width - actual_width))
         
         # 如果内容过长，按显示宽度截断（中文不截中间）
         if [[ $padding -lt 0 ]]; then
-            python3 -c "
-s = '''$clean_content'''
-w = $width
-result = ''
+            clean_content=$(CONTENT="$clean_content" WIDTH="$width" python3 -c '
+import os
+s = os.environ["CONTENT"]
+w = int(os.environ["WIDTH"])
+result = ""
 cur = 0
 for c in s:
     cw = 2 if ord(c) > 127 else 1
@@ -126,21 +129,8 @@ for c in s:
         break
     result += c
     cur += cw
-print(result + '...')
-" > /dev/null
-            clean_content=$(python3 -c "
-s = '''$clean_content'''
-w = $width
-result = ''
-cur = 0
-for c in s:
-    cw = 2 if ord(c) > 127 else 1
-    if cur + cw > w - 3:
-        break
-    result += c
-    cur += cw
-print(result + '...')
-")
+print(result + "...")
+')
             content="$clean_content"
             padding=0
         fi
@@ -1253,7 +1243,7 @@ get_ipv6_address() {
 
 # 删除基础网站列表，只保留完整网站列表
 
-# 完整网站列表（21个）
+# 完整网站列表（19个）
 declare -A FULL_SITES=(
     ["Google"]="google.com"
     ["GitHub"]="github.com"
@@ -1361,17 +1351,20 @@ test_dns_resolution() {
     for domain in "${domains[@]}"; do
         echo -n -e "  └─ ${domain}... "
         local start_time end_time resolution_time
+        local lookup_ok=0
         
         start_time=$(get_timestamp_ms)
         if [ "$dns_server" = "system" ]; then
             nslookup "$domain" >/dev/null 2>&1
+            lookup_ok=$?
         else
             nslookup "$domain" "$dns_server" >/dev/null 2>&1
+            lookup_ok=$?
         fi
         end_time=$(get_timestamp_ms)
         resolution_time=$((end_time - start_time))
         
-        if [ $? -eq 0 ]; then
+        if [ $lookup_ok -eq 0 ]; then
             echo -e "${GREEN}${resolution_time}ms ✅${NC}"
             total_time=$((total_time + resolution_time))
             ((successful_tests++))
@@ -2082,16 +2075,19 @@ run_dns_test() {
                     local start_time
                     local end_time
                     local resolution_time=0
+                    local lookup_ok=0
                     start_time=$(get_timestamp_ms)
                     if [[ "$dns_server" == "system" ]]; then
                         nslookup google.com >/dev/null 2>&1
+                        lookup_ok=$?
                     else
                         nslookup google.com "$dns_server" >/dev/null 2>&1
+                        lookup_ok=$?
                     fi
                     end_time=$(get_timestamp_ms)
                     resolution_time=$((end_time - start_time))
 
-                    if [[ $? -eq 0 ]]; then
+                    if [[ $lookup_ok -eq 0 ]]; then
                         local status=""
                         if [[ "$resolution_time" -lt 50 ]]; then
                             status="优秀"
@@ -2114,7 +2110,7 @@ run_dns_test() {
                 local rank=1
                 for result in "${sorted_res[@]}"; do
                     IFS='|' read -r time dns_name server resolution_time status <<< "$result"
-                    format_row "${rank}.:4:right" "${dns_name}:14:left" "${server}:20:left" "${resolution_time}ms:10:right" "${status}:10:left"
+                    format_row "${rank}.:4:right" "${dns_name}:14:left" "${server}:20:left" "${resolution_time}:10:right" "${status}:10:left"
                     ((rank++))
                 done
 
@@ -2129,7 +2125,7 @@ run_dns_test() {
             # 原来的DNS测试方式
             echo -e "${CYAN}🔍 开始全球DNS解析速度测试（测试所有网站）${NC}"
             echo -e "${BLUE}═══════════════════════════════════════════════════════════════${NC}"
-            echo -e "测试网站: ${YELLOW}${#FULL_SITES[@]}个网站${NC} | DNS服务器: ${YELLOW}$(echo ${!DNS_SERVERS[@]} | wc -w | tr -d ' ')个${NC}"
+            echo -e "测试网站: ${YELLOW}${#FULL_SITES[@]}个网站${NC} | DNS服务器: ${YELLOW}${#DNS_SERVERS[@]}个${NC}"
             echo ""
             
             # 重置结果数组
