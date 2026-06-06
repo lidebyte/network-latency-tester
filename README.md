@@ -23,7 +23,7 @@ bash <(wget -qO- https://ba.sh/gZnH)
 
 ## 📋 测试网站
 
-内置 **19 个**全球知名网站：Google、GitHub、Apple、Microsoft、AWS、Twitter、ChatGPT、Steam、NodeSeek、Netflix、Disney+、Instagram、Telegram、OneDrive、Twitch、Pornhub、YouTube、Facebook、TikTok
+内置 **20 个**全球知名网站：Google、GitHub、Apple、Microsoft、AWS、Twitter、ChatGPT、Claude、Steam、NodeSeek、Netflix、Disney+、Instagram、Telegram、OneDrive、Twitch、Pornhub、YouTube、Facebook、TikTok
 
 ## 📊 延迟等级
 

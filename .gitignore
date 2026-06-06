@@ -1,5 +1,7 @@
 # 测试结果文件
-latency_results_*.txt
+latency_results_*
+dns_results_*
+comprehensive_results_*
 
 # 临时文件
 *.tmp
