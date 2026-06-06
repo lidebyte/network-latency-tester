@@ -12,6 +12,9 @@ cleanup() {
     for f in "${_TEMP_FILES[@]}"; do
         rm -f "$f" 2>/dev/null
     done
+    for f in "${_TEMP_DIRS[@]}"; do
+        rm -rf "$f" 2>/dev/null
+    done
     rm -f /tmp/fping_*_$$ /tmp/download_*_$$ /tmp/dns_*_$$ /tmp/result_*_$$ 2>/dev/null
 }
 trap cleanup EXIT
